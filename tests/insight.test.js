@@ -82,10 +82,10 @@ test('health: weak client, slow uplink, disabled radio, high memory', () => {
 test('health: chip text is short, framed like the System tile, with the full sentence as detail', () => {
 	const h = insight.health(baseModel(), { cpu: { pct: 7, cores: [ 1, 2, 3, 4 ] }, uplinkRate: { rx: 374e6, tx: 3.77e6 } });
 	/* the uplink value is live traffic; the link speed is context */
-	assert.equal(byId(h, 'uplink').value, '↓ 374 Mbit/s');
+	assert.equal(byId(h, 'uplink').value, '↓ 46.8 MB/s');
 	/* the path already names the device: with a rate, the reason doesn't */
 	/* the link speed spelled as everywhere else ('2.5 Gbit/s') */
-	assert.equal(byId(h, 'uplink').reason.replace(/\u00a0/g, ' '), '↑ 3.77 Mbit/s · 2.5 Gbit/s link');
+	assert.equal(byId(h, 'uplink').reason.replace(/\u00a0/g, ' '), '↑ 471 kB/s · 2.5 Gbit/s link');
 	assert.equal(byId(insight.health(baseModel(), {}), 'uplink').reason.replace(/\u00a0/g, ' '), 'eth0 · 2.5 Gbit/s link');
 	assert.match(byId(h, 'uplink').detail, /eth0 up at 2\.5 Gbit\/s, gateway 192\.0\.2\.1/);
 	/* memory is framed as available, like the System tile; storage says used */

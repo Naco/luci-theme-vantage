@@ -251,10 +251,10 @@ test('wired branch: each port node shows its traffic, all its hosts\' together',
 	self.updateWiredBranch(b);
 	const [ shared, alone ] = b.ssids;
 	/* full units: each its own where they differ */
-	assert.deepEqual([ shared.name.textContent, shared.count.textContent, shared.rate.textContent ], [ 'lan5', '2 devices', '↓ 12.3 Mbit/s  ↑ 3 kbit/s' ]);
-	assert.equal(shared.el.attrs.title, 'Show the devices on lan5\nPort total: ↓ 12.3 Mbit/s · ↑ 3 kbit/s');
+	assert.deepEqual([ shared.name.textContent, shared.count.textContent, shared.rate.textContent ], [ 'lan5', '2 devices', '↓ 1.54 MB/s  ↑ 375 B/s' ]);
+	assert.equal(shared.el.attrs.title, 'Show the devices on lan5\nPort total: ↓ 1.54 MB/s · ↑ 375 B/s');
 	assert.deepEqual([ alone.name.textContent, alone.rate.textContent, alone.el.attrs.title ], [ 'lan6 · h03', '—', 'Show the devices on lan6' ], 'no counters yet: a dash, no total');
-	assert.equal(b.sub.textContent, '↓ 12.3 Mbit/s');
+	assert.equal(b.sub.textContent, '↓ 1.54 MB/s');
 });
 
 test('names beyond a poll: reverse DNS and the vendor table for wired hosts too', async () => {
@@ -628,7 +628,7 @@ test('other lines: each node shows its name, gateway and live rates, wired into 
 	self.updateHero();
 	assert.equal(h.gwKicker.textContent, 'wan', 'beside other lines the main one goes by its name');
 	const [ b, l ] = h.lines;
-	assert.deepEqual([ b.kicker.textContent, b.title.textContent, b.dn.textContent, b.up.textContent ], [ 'wanb', '203.0.113.21', '↓ 12.3 Mbit/s', '↑ 3 kbit/s' ]);
+	assert.deepEqual([ b.kicker.textContent, b.title.textContent, b.dn.textContent, b.up.textContent ], [ 'wanb', '203.0.113.21', '↓ 1.54 MB/s', '↑ 375 B/s' ]);
 	assert.equal(b.el.attrs.title, 'wanb · eth2 · 1 Gbit/s · full duplex');
 	assert.equal(b.el.attrs['class'], 'vt-node vt-node-gw vt-node-line');
 	assert.deepEqual([ l.title.textContent, l.dn.textContent, l.up.textContent ], [ 'wwan0', 'idle', '' ], 'no gateway address: the device; nothing moving: idle');
@@ -688,10 +688,10 @@ test('other lines: the uplink drawer shows the line asked for, its rates and rou
 	withDom(() => {
 		const d = self.drawerUplink('wanb'), all = texts({ children: d.title.concat(d.body) });
 		assert.ok(all.includes('Uplink · wanb'));
-		assert.ok(all.includes('3 Mbit/s') && all.includes('4 Mbit/s'), 'its own rates');
+		assert.ok(all.includes('375 kB/s') && all.includes('500 kB/s'), 'its own rates');
 		assert.deepEqual(all.slice(all.indexOf('Route metric'), all.indexOf('Route metric') + 2), [ 'Route metric', '20' ]);
 		const main = texts({ children: [].concat(self.drawerUplink('').title, self.drawerUplink('').body) });
-		assert.ok(main.includes('Uplink · wan') && main.includes('1 Mbit/s') && main.includes('10'));
+		assert.ok(main.includes('Uplink · wan') && main.includes('125 kB/s') && main.includes('10'));
 		/* a backup named "uplink" is that backup, not the main line */
 		const named = LINE('uplink', 'eth3', 30);
 		self.m.uplinks = [ wan, named ];
@@ -700,7 +700,7 @@ test('other lines: the uplink drawer shows the line asked for, its rates and rou
 		/* failover: wanb is the main line now, its drawer still wanb's, at the fast lane's rate */
 		self.m = { uplink: wanb, uplinks: [ wanb ] };
 		const now = texts({ children: [].concat(self.drawerUplink('wanb').title, self.drawerUplink('wanb').body) });
-		assert.ok(now.includes('Uplink · wanb') && now.includes('1 Mbit/s'));
+		assert.ok(now.includes('Uplink · wanb') && now.includes('125 kB/s'));
 		/* wan is down: said so under its own name, not wanb's details */
 		const gone = texts({ children: [].concat(self.drawerUplink('wan').title, self.drawerUplink('wan').body) });
 		assert.deepEqual(gone.filter(t => /Uplink|down/.test(t)), [ 'Uplink · wan', 'This line is down or has no default route now.' ]);

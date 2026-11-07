@@ -33,30 +33,30 @@ return baseclass.extend({
 		return t;
 	},
 
-	/* bits per second -> { v: '372', u: 'Mbit/s' } */
-	bitsParts: function(bps) {
+	/* Samples are in bit/s. Show byte throughput, or the negotiated link rate. */
+	bitsParts: function(bps, linkSpeed) {
 		bps = num(bps);
 		if (bps == null || bps < 0) return { v: DASH, u: '' };
-		var u = [ _('bit/s', 'vantage'), _('kbit/s', 'vantage'), _('Mbit/s'), _('Gbit/s', 'vantage'), _('Tbit/s') ], i = 0;
-		while (bps >= 1000 && i < u.length - 1) { bps /= 1000; i++; }
+		var u = linkSpeed ? [ _('bit/s', 'vantage'), _('kbit/s', 'vantage'), _('Mbit/s'), _('Gbit/s', 'vantage'), _('Tbit/s') ] : [ 'B/s', 'kB/s', 'MB/s', 'GB/s' ], i = 0;
+		for (bps /= linkSpeed ? 1 : 8; bps >= 1000 && i < u.length - 1; i++) bps /= 1000;
 		return { v: i === 0 ? bps.toFixed(0) : sig3(bps), u: u[i] };
 	},
 
-	bits: function(bps) {
-		var p = this.bitsParts(bps);
+	bits: function(bps, linkSpeed) {
+		var p = this.bitsParts(bps, linkSpeed);
 		return p.u ? p.v + ' ' + p.u : p.v;
 	},
 
 	/* a download and upload rate for a row, as { dn, up, unit }: one
 	   unit for both when they read in the same one ('376', '3.4',
-	   'Mbit/s'), else each with its own and unit '' */
+	   'MB/s'), else each with its own and unit '' */
 	rateParts: function(down, up) {
 		var a = this.bitsParts(down), b = this.bitsParts(up);
 		if (a.u && a.u === b.u) return { dn: a.v, up: b.v, unit: a.u };
 		return { dn: a.u ? a.v + ' ' + a.u : a.v, up: b.u ? b.v + ' ' + b.u : b.v, unit: '' };
 	},
 
-	/* '↓ 376  ↑ 3.4 Mbit/s', '↓ 12.3 Mbit/s  ↑ 800 bit/s'; 'idle' when
+	/* '↓ 376  ↑ 3.4 MB/s', '↓ 12.3 MB/s  ↑ 800 B/s'; 'idle' when
 	   nothing moves */
 	rates: function(down, up) {
 		if (num(down) === 0 && num(up) === 0) return _('idle');
@@ -87,7 +87,7 @@ return baseclass.extend({
 	phyRate: function(kbit) {
 		kbit = num(kbit);
 		if (kbit == null || kbit <= 0) return DASH;
-		return this.bits(kbit * 1000);
+		return this.bits(kbit * 1000, true);
 	},
 
 	pct: function(p, digits) {

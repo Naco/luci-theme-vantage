@@ -8,19 +8,23 @@ const fmt = load('vantage.fmt');
 const wifi = load('vantage.wifi');
 const series = load('vantage.series');
 
-test('fmt: bits, bytes, PHY rates, durations, placeholders for junk', () => {
-	assert.equal(fmt.bits(372.3e6), '372 Mbit/s');
-	assert.equal(fmt.bits(2.95e6), '2.95 Mbit/s');
-	assert.equal(fmt.bits(12.34e3), '12.3 kbit/s');
-	assert.equal(fmt.bits(0), '0 bit/s');
+test('fmt: byte throughput, storage, PHY rates, durations, placeholders for junk', () => {
+	assert.equal(fmt.bits(372.3e6), '46.5 MB/s');
+	assert.equal(fmt.bits(2.95e6), '369 kB/s');
+	assert.equal(fmt.bits(12.34e3), '1.54 kB/s');
+	assert.equal(fmt.bits(0), '0 B/s');
+	assert.equal(fmt.bits(8e3), '1 kB/s');
+	assert.equal(fmt.bits(8e6), '1 MB/s');
+	assert.equal(fmt.bits(8e9), '1 GB/s');
+	assert.deepEqual(fmt.bitsParts(2.33e6), { v: '291', u: 'kB/s' });
 	assert.equal(fmt.bits(-1), '—');
 	assert.equal(fmt.bits('x'), '—');
 	/* a row's download and upload: one unit where both read in it */
-	assert.equal(fmt.rates(376e6, 3.4e6), '↓ 376  ↑ 3.4 Mbit/s');
-	assert.equal(fmt.rates(12.3e6, 800), '↓ 12.3 Mbit/s  ↑ 800 bit/s');
+	assert.equal(fmt.rates(376e6, 3.4e6), '↓ 47.0 MB/s  ↑ 425 kB/s');
+	assert.equal(fmt.rates(12.3e6, 800), '↓ 1.54 MB/s  ↑ 100 B/s');
 	assert.equal(fmt.rates(0, 0), 'idle');
-	assert.equal(fmt.rates(null, 2e3), '↓ —  ↑ 2 kbit/s');
-	assert.deepEqual(fmt.rateParts(400e6, 1.5e9), { dn: '400 Mbit/s', up: '1.5 Gbit/s', unit: '' });
+	assert.equal(fmt.rates(null, 2e3), '↓ —  ↑ 250 B/s');
+	assert.deepEqual(fmt.rateParts(400e6, 1.5e9), { dn: '50.0', up: '188', unit: 'MB/s' });
 	/* counts: thousands apart from five digits on */
 	assert.equal(fmt.count(20224239), '20\u202f224\u202f239');
 	assert.equal(fmt.count(1234), '1234');
