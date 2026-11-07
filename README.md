@@ -4,6 +4,12 @@
 
 # Vantage
 
+**Naco fork** · [UniFi AP overlay / 中文安装说明](addons/unifi-aps/README.md) · [Downloads](https://github.com/Naco/luci-theme-vantage/releases)
+
+The overlay adds compact UniFi AP cards beside LAN on the Vantage dashboard.
+The original Vantage documentation follows.
+
+
 **A theme and live dashboard for LuCI, OpenWrt's web interface. Log in and see who's connected, how busy your connection is, and what needs fixing. For OpenWrt 25.12 and 24.10.**
 
 ![OpenWrt 25.12 and 24.10](https://img.shields.io/badge/OpenWrt-25.12%20%7C%2024.10-00B5E2?style=flat-square) ![LuCI theme + app](https://img.shields.io/badge/LuCI-theme%20%2B%20app-5a6472?style=flat-square) ![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-3d8b40?style=flat-square)

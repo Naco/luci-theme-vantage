@@ -1,0 +1,20 @@
+import { popen } from 'fs';
+
+return {
+	'luci.unifi_aps': {
+		list: {
+			call: function() {
+				let child = popen('/usr/bin/python3 -I -B /usr/libexec/luci-unifi-aps.py', 'r');
+				if (!child)
+					return { state: 'unavailable', aps: [] };
+				let output = child.read(16384);
+				child.close();
+				try {
+					return json(output);
+				} catch (e) {
+					return { state: 'unavailable', aps: [] };
+				}
+			}
+		}
+	}
+};

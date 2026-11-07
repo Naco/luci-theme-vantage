@@ -1,0 +1,39 @@
+/* Keep the LAN and its external access points side by side. */
+.vt-app .vt-branch-unifi {
+	grid-template-columns: clamp(84px, 34%, 108px) minmax(0, 210px);
+	column-gap: 18px;
+}
+.vt-app .vt-branch-unifi > .vt-node-net {
+	grid-column: auto;
+	min-width: 0;
+	padding: 6px 7px;
+}
+.vt-app .vt-branch-unifi > .vt-node-net .vt-node-sub {
+	overflow-wrap: anywhere;
+	white-space: normal;
+	font-size: 0.72rem;
+}
+.vt-app .vt-branch-unifi > .vt-unifi-list {
+	padding-left: 0;
+	gap: 4px;
+}
+.vt-app .vt-unifi-list .vt-unifi-card {
+	padding: 4px 7px;
+	min-width: 0;
+}
+.vt-app .vt-unifi-card .vt-node-body {
+	min-width: 0;
+	gap: 1px;
+}
+.vt-app .vt-unifi-card .vt-node-title {
+	display: block;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.vt-app .vt-unifi-card .vt-node-sub {
+	font-size: 0.72rem;
+	line-height: 1.2;
+	white-space: normal;
+	overflow-wrap: anywhere;
+}

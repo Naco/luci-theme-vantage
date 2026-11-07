@@ -1,0 +1,6 @@
+{
+  "luci-unifi-aps": {
+    "description": "Read adopted UniFi AP inventory for the LAN path",
+    "read": { "ubus": { "luci.unifi_aps": [ "list" ] } }
+  }
+}
