@@ -694,10 +694,14 @@ return baseclass.extend({
 		   Wi-Fi, once per MAC (the entry heard last, a learned one before
 		   a static one), stations left out */
 		var staMacs = Object.create(null), fdb = Object.create(null), wiredMacs = [];
+		var dockerBridges = arr(raw.dockerBridges);
 		everyone.forEach(function(e) { staMacs[e.mac] = true; });
 		arr(raw.fdb).forEach(function(h) {
 			var mac = h && names.normMac(h.mac);
 			if (!mac || staMacs[mac] || typeof h.port !== 'string' || self.isWireless(h.port, devs[h.port], wlNames)) return;
+			/* Docker's default bridge names, plus explicitly configured custom bridges. */
+			if (/^veth/.test(h.port) && typeof h.bridge === 'string' &&
+			    (/^(docker0|br-[0-9a-f]{12})$/.test(h.bridge) || dockerBridges.indexOf(h.bridge) >= 0)) return;
 			var seen = finite(h.seen) && h.seen >= 0 ? h.seen : null, prev = fdb[mac];
 			if (prev && (seen == null || (prev.seen != null && prev.seen <= seen))) return;
 			if (!prev) wiredMacs.push(mac);

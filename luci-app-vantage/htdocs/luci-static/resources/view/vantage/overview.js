@@ -662,6 +662,7 @@ return view.extend({
 		var self = this;
 		return L.resolveDefault(callUciGet('vantage'), {}).then(function(values) {
 			var list = (values && typeof values === 'object') ? Object.keys(values).map(function(k) { return values[k]; }) : [];
+			self.dockerBridges = values && values.main && values.main.docker_bridge;
 			self.aliases = names.aliasMap(list.slice(0, names.ALIAS_MAX + 1));
 			return self.aliases;
 		});
@@ -826,7 +827,7 @@ return view.extend({
 		var m = model.build({
 			board: this.board, info: raw.info, ifaces: raw.ifaces, devs: raw.devs, wifi: raw.wifi, iwinfo: raw.iwinfo,
 			assoc: raw.assoc, hapd: raw.hapd, hapdStatus: raw.hapdStatus, hints: raw.hints, fdb: raw.fdb,
-			switches: raw.switches, switchState: raw.switchState, routes: raw.routes,
+			switches: raw.switches, switchState: raw.switchState, routes: raw.routes, dockerBridges: this.dockerBridges,
 			aliases: this.aliases, rdns: st.rdns, mdns: st.mdns,
 			vendor: st.oui ? function(k) { return k ? st.oui.lookup(k) : null; } : null
 		});
@@ -1050,7 +1051,7 @@ return view.extend({
 		var m = model.build({
 			board: this.board, info: raw.info, ifaces: raw.ifaces, devs: raw.devs, wifi: raw.wifi, iwinfo: raw.iwinfo,
 			assoc: raw.assoc, hapd: raw.hapd, hapdStatus: raw.hapdStatus, hints: raw.hints, fdb: raw.fdb,
-			switches: raw.switches, switchState: raw.switchState, routes: raw.routes,
+			switches: raw.switches, switchState: raw.switchState, routes: raw.routes, dockerBridges: this.dockerBridges,
 			aliases: this.aliases, rdns: st.rdns, mdns: st.mdns,
 			vendor: st.oui ? function(k) { return k ? st.oui.lookup(k) : null; } : null
 		});

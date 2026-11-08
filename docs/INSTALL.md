@@ -37,6 +37,14 @@ ssh root@192.0.2.1 'rm -f /tmp/luci-theme-vantage-*.apk /tmp/luci-app-vantage-*.
 Then **log out of LuCI and log in again**. The dashboard is now the first
 page you see after login. Every step is explained below.
 
+### Custom Docker bridges
+
+The dashboard omits learned hosts on `veth` ports attached to `docker0`
+or Docker's generated `br-<network-id>` bridges. For a Docker bridge with
+a custom name, add `list docker_bridge 'br-containers'` to the existing
+`config vantage 'main'` section in `/etc/config/vantage`, then reload the
+dashboard. The filter uses bridge and port names regardless of MAC type.
+
 ## Contents
 
 - [Requirements](#requirements)

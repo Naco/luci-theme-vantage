@@ -725,6 +725,31 @@ test('build: wired hosts from luci.vantage wired, one per MAC, Wi-Fi ports and s
 	assert.deepEqual(model.build({}).wiredHosts, []);
 });
 
+test('build: Docker bridge veth endpoints are omitted while private LAN clients remain', () => {
+	const privateMac = '02:00:5e:00:00:01';
+	const m = model.build({
+		dockerBridges: [ 'br-containers' ],
+		wifi: { radio0: { up: true, interfaces: [ { ifname: 'phy0-ap0', config: { mode: 'ap' } } ] } },
+		assoc: { 'phy0-ap0': [ { mac: '02:00:5e:00:00:07' } ] },
+		fdb: [
+			{ mac: privateMac, port: 'vethaaaaaaa', bridge: 'docker0', seen: 1 },
+			{ mac: privateMac, port: 'eth0', bridge: 'br-lan', seen: 10 },
+			{ mac: '02:00:5e:00:00:02', port: 'vethbbbbbbb', bridge: 'br-' + '1234'.repeat(3) },
+			{ mac: '02:00:5e:00:00:03', port: 'vethccccccc', bridge: 'br-containers' },
+			{ mac: '02:00:5e:00:00:04', port: 'vethddddddd', bridge: 'br-lab' },
+			{ mac: '02:00:5e:00:00:05', port: 'eth1', bridge: 'br-containers' },
+			{ mac: '00:00:5e:00:53:06', port: 'vetheeeeeee', bridge: 'docker0' }
+		]
+	});
+	assert.deepEqual(m.wiredHosts.map(h => [ h.mac, h.port ]), [
+		[ privateMac, 'eth0' ],
+		[ '02:00:5e:00:00:04', 'vethddddddd' ],
+		[ '02:00:5e:00:00:05', 'eth1' ]
+	]);
+	assert.equal(m.wiredHosts[0].isPrivate, true);
+	assert.deepEqual(m.clients.map(h => [ h.mac, h.isPrivate ]), [ [ '02:00:5e:00:00:07', true ] ]);
+});
+
 test('build: a wired host on a bridge VLAN gets that VLAN\'s network and addresses', () => {
 	const m = model.build({
 		ifaces: [
