@@ -2,6 +2,8 @@
 
 [中文说明](#中文说明)
 
+[接入分类、独立 Wi-Fi 分组与原生概览安装](home-access/README.md)
+
 This add-on for the stock Vantage dashboard displays local UniFi access points as compact cards to the right of LAN, including on phone-sized screens. Cards contain the controller's device name, model and management IPv4 address. The LAN grouping follows the router's LAN subnet. The cards do not report live availability, client counts or physical switch topology.
 
 ## Install

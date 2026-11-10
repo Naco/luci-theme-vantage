@@ -1,0 +1,6 @@
+{
+  "luci-home-access": {
+    "description": "Read current home OpenVPN session names and tunnel addresses",
+    "read": { "ubus": { "luci.home_access": [ "vpn" ] } }
+  }
+}

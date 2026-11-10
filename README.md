@@ -4,7 +4,7 @@
 
 # Vantage
 
-**Naco fork** · [UniFi AP overlay / 中文安装说明](addons/unifi-aps/README.md) · [Downloads](https://github.com/Naco/luci-theme-vantage/releases)
+**Naco fork** · [UniFi AP overlay / 中文安装说明](addons/unifi-aps/README.md) · [接入分类与原生概览](addons/unifi-aps/home-access/README.md) · [Downloads](https://github.com/Naco/luci-theme-vantage/releases)
 
 The overlay adds compact UniFi AP cards beside LAN on the Vantage dashboard.
 The original Vantage documentation follows.

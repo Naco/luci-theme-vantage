@@ -1,0 +1,20 @@
+import { popen } from 'fs';
+
+return {
+	'luci.home_access': {
+		vpn: {
+			call: function() {
+				let child = popen('/usr/bin/python3 -I -B /usr/libexec/luci-home-access-vpn.py', 'r');
+				if (!child)
+					return { state: 'unavailable', clients: [] };
+				let output = child.read(32768);
+				child.close();
+				try {
+					return json(output);
+				} catch (e) {
+					return { state: 'unavailable', clients: [] };
+				}
+			}
+		}
+	}
+};
