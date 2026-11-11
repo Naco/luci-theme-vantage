@@ -24,6 +24,45 @@ var POLL_S = 5;
    small reads (/proc/stat, the uplink device's counters), where the full
    poll makes eight */
 var FAST_S = 2;
+/* Low-power router (#101; the Vantage theme's Appearance, data-vt-power):
+   the live numbers as always, the slow parts (Wi-Fi state, the radios'
+   iwinfo, client capabilities, temperatures, wired hosts) once every
+   LOW_SLOW_MS, their last replies in between; nothing moves, and nothing
+   stands still mid-move: no backdrop, no flow dots (applyPower) */
+var LOW_SLOW_MS = 30 * 1000;
+/* ... and after LOW_IDLE_MS without input (a page left open), the full
+   poll every LOW_IDLE_POLL_MS and no fast lane, until the next input */
+var LOW_IDLE_MS = 5 * 60 * 1000;
+var LOW_IDLE_POLL_MS = 30 * 1000;
+/* iwinfo info costs the router 15-22 ms an interface: asked again after
+   IWINFO_MS, or at once when the interface's state moved (its radio up,
+   down, pending or reconfigured in luci.vantage wireless; its channel,
+   frequency, BSSID or SSID in hostapd's get_status, asked every poll).
+   The noise floor, which moves, comes every poll from iwinfo survey
+   (1.5-2 ms a radio), its entry for the radio's channel */
+var IWINFO_MS = 30 * 1000;
+/* luci-rpc getHostHints reads the DHCP leases and the ARP table: asked
+   again after HINTS_MS, and on each of the HINTS_HOT polls after a
+   station or wired host first appears, since its lease follows its
+   association by a moment; in between, its last reply */
+var HINTS_MS = 30 * 1000;
+var HINTS_HOT = 3;
+/* One clock for everything that moves (the status circle's ring, the Live
+   beat, the flow dots, the backdrop): a compositor animation makes the
+   browser draw a frame on every display refresh, sixty a second, however
+   slow the motion; here the pulses (CSS animations) and the dots are paused
+   through the Web Animations API and stepped MOTION_MS apart, 20 frames a
+   second, or at the backdrop's own rate (up to 30) while it draws. Under
+   the Vantage theme the ticks go out as vantage:tick, so the theme's
+   refresh dot moves on the same frames (menu-vantage.js) */
+var MOTION_MS = 50;
+/* the flow dots too (false: they stay compositor animations, as before) */
+var STEP_DOTS = false;
+var MOTION_EVENT = 'vantage:tick';
+/* the pulses' animation names (app.css vt-ring, vt-ring-soft, vt-beat,
+   vt-beat-soft); spelled without a class-like token for the theme's
+   class scan (tests/theme-css.test.js) */
+var PULSE_NAME = new RegExp('^vt' + '-(?:ring|beat)');
 var WINDOW_MS = 5 * 60 * 1000;        /* throughput history shown */
 var HIST_MAX = 90;
 var HIST_FAST = 160;                  /* five minutes at FAST_S, and some */
@@ -31,6 +70,7 @@ var GONE_KEEP_MS = 5 * 60 * 1000;     /* disconnected stations stay listed */
 var TALKERS = 3;                      /* top talkers shown; the tile keeps room for all */
 var SWITCH_MS = 30 * 1000;            /* LuCI runs swconfig for each switch's link state: at most this often */
 var STORE_KEY = 'vantage.hist.v1';
+var VERSION = '1.0.19';               /* this package's, as its Makefile has it (tests/version.test.js) */
 var SVGNS = 'http://www.w3.org/2000/svg';
 var HOSTAPD_OBJ = /^[A-Za-z0-9_.-]{1,64}$/;
 
@@ -57,10 +97,14 @@ var callSwitchPorts = rpc.declare({ object: 'luci', method: 'getSwconfigPortStat
 var callHints = rpc.declare({ object: 'luci-rpc', method: 'getHostHints', expect: { '': {} } });
 var callIwInfo = rpc.declare({ object: 'iwinfo', method: 'info', params: [ 'device' ], expect: { '': {} } });
 var callAssoc = rpc.declare({ object: 'iwinfo', method: 'assoclist', params: [ 'device' ], expect: { results: [] } });
+/* the channels' survey: the noise floor of the radio's own (model.js
+   surveyNoise); null when the call fails */
+var callSurvey = rpc.declare({ object: 'iwinfo', method: 'survey', params: [ 'device' ], expect: { results: [] } });
 var callRrdns = rpc.declare({ object: 'network.rrdns', method: 'lookup', params: [ 'addrs', 'timeout', 'limit' ], expect: { '': {} } });
 var callMdns = rpc.declare({ object: 'umdns', method: 'hosts' });
 var callUciGet = rpc.declare({ object: 'uci', method: 'get', params: [ 'config' ], expect: { values: {} } });
 var callSetAlias = rpc.declare({ object: 'luci.vantage', method: 'set_alias', params: [ 'mac', 'name', 'icon' ] });
+var callSetQuiet = rpc.declare({ object: 'luci.vantage', method: 'set_quiet', params: [ 'mac', 'quiet' ] });
 var callAccess = rpc.declare({ object: 'session', method: 'access', params: [ 'scope', 'object', 'function' ], expect: { access: false } });
 
 var hostapdCalls = {};
@@ -88,6 +132,30 @@ function loadCss() {
 
 function reducedMotion() {
 	return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+}
+
+/* an animation's iteration length in ms, 0 when unknown */
+function pulseDuration(a) {
+	var tm = a.effect && typeof a.effect.getTiming === 'function' ? a.effect.getTiming() : null;
+	return tm && typeof tm.duration === 'number' && tm.duration > 0 ? tm.duration : 0;
+}
+
+/* is a the CSS animation an animation event (ev) is for: the same
+   element, pseudo-element and name */
+function pulseOf(a, ev) {
+	var e = a && a.effect;
+	return !!e && e.target === ev.target && (e.pseudoElement || '') === (ev.pseudoElement || '') && a.animationName === ev.animationName;
+}
+
+/* a paused animation dt ms on. The time is kept here (x.at), never read
+   back: reading a CSS animation's currentTime makes the browser bring
+   the style up to date first, once per animation. An endless one is kept
+   within one iteration (the same phase, so the numbers never grow) */
+function stepAnim(x, dt) {
+	var t = (x.at || 0) + dt;
+	if (x.dur > 0 && t >= x.dur) t -= Math.floor(t / x.dur) * x.dur;
+	x.at = t;
+	x.a.currentTime = t;
 }
 
 /* is the page rendered by the Vantage theme (L.env.media '/luci-static/vantage')? */
@@ -263,7 +331,7 @@ function sparkline(data, cols, vmax, cls, opts) {
 	}
 	cols.slice().reverse().forEach(function(ci) {
 		var k = cols.indexOf(ci);
-		var segs = series.segments(data, ci, t0, t1, max, W, H, POLL_S * 3500);
+		var segs = series.segments(data, ci, t0, t1, max, W, H, gapMs());
 		var g = document.createElementNS(SVGNS, 'g');
 		g.setAttribute('class', 'vt-spark-s' + k);
 		if (k === 0) {
@@ -458,8 +526,42 @@ function spanShort(ms) {
 	return s >= 60 ? _('%d min', 'vantage').format(Math.floor(s / 60)) : _('%d s', 'vantage').format(s);
 }
 
+/* the history belongs to one login: the next one in this tab starts empty,
+   under any theme. Vantage's login page also deletes it (login.js). */
+function storeOwner() {
+	return String(L.env.sessionid || '').slice(-8);
+}
+
 function readStore() {
-	try { return JSON.parse(window.sessionStorage.getItem(STORE_KEY) || 'null'); } catch (e) { return null; }
+	try {
+		var v = JSON.parse(window.sessionStorage.getItem(STORE_KEY) || 'null');
+		return v && (v.sid || '') === storeOwner() ? v : null;
+	} catch (e) { return null; }
+}
+
+/* the last CPU reading, { pct, cores, t } (t: when, by this browser's
+   clock), kept in this browser for every tab of this router (the
+   storage is the router's origin's), at most every CPU_SAVE_MS: shown
+   for CPU_HOLD_MS while the dashboard's first measurement runs (#101),
+   instead of a dash. heldCpu: null when it is malformed or older */
+var CPU_KEY = 'vantage.cpu.v1';
+var CPU_HOLD_MS = 10 * 60 * 1000;
+var CPU_SAVE_MS = 10 * 1000;
+/* the first reading takes two samples a second apart (model.cpuUsage):
+   the second is asked this long after the first, not at the lane's
+   next tick */
+var CPU_FIRST_MS = 1100;
+function readCpu() {
+	try { return JSON.parse(window.localStorage.getItem(CPU_KEY) || 'null'); } catch (e) { return null; }
+}
+function writeCpu(v) {
+	try { window.localStorage.setItem(CPU_KEY, JSON.stringify(v)); } catch (e) {}
+}
+function heldCpu(v, now) {
+	var pct = function(x) { return typeof x === 'number' && isFinite(x) && x >= 0 && x <= 100; };
+	if (!v || typeof v !== 'object' || !pct(v.pct) || !Array.isArray(v.cores) || v.cores.length > 256 ||
+	    !v.cores.every(function(c) { return c === null || pct(c); }) || typeof v.t !== 'number' || !(now - v.t >= 0 && now - v.t < CPU_HOLD_MS)) return null;
+	return { pct: v.pct, cores: v.cores.slice(), t: v.t };
 }
 
 function writeStore(v) {
@@ -587,6 +689,15 @@ function readBackdrop() {
 	return backdrop.STYLES.indexOf(v) >= 0 ? v : backdrop.STYLES[0];
 }
 
+/* a gap in a series: no sample for longer than this. A Low-power router
+   left idle asks every LOW_IDLE_POLL_MS: its samples are no gaps */
+function gapMs() { return lowPower() ? LOW_IDLE_POLL_MS * 1.75 : POLL_S * 3500; }
+
+function lowPower() {
+	var root = typeof document !== 'undefined' ? document.documentElement : null;
+	return !!(root && root.getAttribute && root.getAttribute('data-vt-power') === 'low');
+}
+
 function writeBackdrop(v) {
 	/* the theme takes it (and cancels the event) */
 	var ev = null;
@@ -663,7 +774,9 @@ return view.extend({
 		return L.resolveDefault(callUciGet('vantage'), {}).then(function(values) {
 			var list = (values && typeof values === 'object') ? Object.keys(values).map(function(k) { return values[k]; }) : [];
 			self.dockerBridges = values && values.main && values.main.docker_bridge;
-			self.aliases = names.aliasMap(list.slice(0, names.ALIAS_MAX + 1));
+			var of = function(t) { return list.filter(function(s) { return s && s['.type'] === t; }); };
+			self.aliases = names.aliasMap(of('client').slice(0, names.ALIAS_MAX + 1));
+			self.quiet = names.quietSet(of('quiet').slice(0, names.QUIET_MAX + 1));
 			return self.aliases;
 		});
 	},
@@ -671,32 +784,77 @@ return view.extend({
 	/* one poll's worth of raw replies; missing pieces degrade to {} */
 	fetch: function() {
 		var started = Date.now(), self = this;
+		/* Low-power router: the slow parts once every LOW_SLOW_MS */
+		var age = started - this.slowAt;
+		var slow = !lowPower() || !this.slowCache || !(age >= 0 && age < LOW_SLOW_MS);
+		var kept = this.slowCache || {};
+		/* the host hints: their last reply until they are due */
+		var hintsAge = started - (this.hintsAt || 0);
+		var hintsDue = !this.hintsCache || this.hintsHot > 0 || !(hintsAge >= 0 && hintsAge < HINTS_MS);
 		return Promise.all([
 			L.resolveDefault(callInfo(), {}),
 			L.resolveDefault(callRead('/proc/stat'), ''),
 			L.resolveDefault(callIfDump(), []),
 			L.resolveDefault(callDevs(), {}),
-			/* null when the call fails: no answer is not "no radios" */
-			L.resolveDefault(callWifi(), null),
-			L.resolveDefault(callHints(), {}),
-			L.resolveDefault(callThermal(), []),
-			L.resolveDefault(callWired(), {}),
+			/* null when the call fails: no answer is not "no radios" (nor
+			   no sensors or no wired hosts, which then read as none) */
+			slow ? L.resolveDefault(callWifi(), null) : Promise.resolve(kept.wifi),
+			hintsDue ? L.resolveDefault(callHints(), null) : Promise.resolve(this.hintsCache),
+			slow ? L.resolveDefault(callThermal(), null) : Promise.resolve(kept.thermal),
+			slow ? L.resolveDefault(callWired(), null) : Promise.resolve(kept.wired),
 			/* null when the call fails (an older plugin): netifd's metrics decide */
 			L.resolveDefault(callRoutes(), null)
 		]).then(function(r) {
 			var wifiDevs = (r[4] && typeof r[4] === 'object') ? r[4] : null;
 			var wiredReply = (r[7] && typeof r[7] === 'object') ? r[7] : {};
-			var ifnames = [];
+			var ifnames = [], radioFirst = Object.create(null), surveyFor = Object.create(null);
 			Object.keys(wifiDevs || {}).forEach(function(rn) {
-				var ifs = (wifiDevs[rn] && Array.isArray(wifiDevs[rn].interfaces)) ? wifiDevs[rn].interfaces : [];
+				var ifs = (wifiDevs[rn] && Array.isArray(wifiDevs[rn].interfaces)) ? wifiDevs[rn].interfaces : [], first = true;
+				/* a radio read from the config has no run state: each of
+				   its interfaces' iwinfo says whether it is up (model.js) */
+				var cfg = wifiDevs[rn] && wifiDevs[rn].source === 'config';
 				ifs.forEach(function(i) {
-					if (i && typeof i.ifname === 'string' && HOSTAPD_OBJ.test(i.ifname) && ifnames.indexOf(i.ifname) < 0) ifnames.push(i.ifname);
+					if (i && typeof i.ifname === 'string' && HOSTAPD_OBJ.test(i.ifname) && ifnames.indexOf(i.ifname) < 0) {
+						ifnames.push(i.ifname);
+						if (first || cfg) radioFirst[i.ifname] = true;
+						if (first) surveyFor[i.ifname] = true;
+						first = false;
+					}
 				});
 			});
-			/* iwinfo per interface: channel and power for the radio, BSSID
-			   and SSID for each network (luci.vantage wireless carries
-			   configuration only) */
+			/* iwinfo info (luci.vantage wireless carries configuration only):
+			   a radio's first interface gives its channel, power and noise;
+			   another network's BSSID and SSID come from hostapd's get_status,
+			   asked anyway, once it answered with them. An interface hostapd
+			   did not answer for (a client or mesh, a vendor driver) keeps
+			   its own iwinfo info. Each costs the router ~15 ms. */
+			var hapdKnown = self.hapdBss || {}, hapdLast = self.hapdLast || {};
 			var per = [];
+			/* a failed call keeps the last reply, is asked again next poll
+			   and spends none of the extra tries after a new device */
+			if (hintsDue && r[5] && typeof r[5] === 'object') {
+				self.hintsCache = r[5];
+				self.hintsAt = started;
+				if (self.hintsHot > 0) self.hintsHot--;
+			}
+			/* the state an interface's iwinfo reading belongs to: asked
+			   again when this moves, else after IWINFO_MS */
+			var iwc = self.iwCache || (self.iwCache = Object.create(null)), radioOf = Object.create(null);
+			Object.keys(wifiDevs || {}).forEach(function(rn) {
+				((wifiDevs[rn] && wifiDevs[rn].interfaces) || []).forEach(function(i) { if (i && typeof i.ifname === 'string') radioOf[i.ifname] = rn; });
+			});
+			function iwKey(ifn) {
+				var rd = (wifiDevs && wifiDevs[radioOf[ifn]]) || {}, c = rd.config || {}, h = hapdLast[ifn];
+				var st = h && typeof h === 'object' ? [ h.channel, h.freq, h.bssid, h.ssid ].map(String).join('|') : '';
+				return [ rd.up, rd.pending, rd.disabled, c.channel, c.htmode, c.txpower, c.country ].map(String).join('|') + '\n' + st;
+			}
+			function iwDue(ifn) {
+				var e = iwc[ifn], iwAge = e ? started - e.at : -1, key = iwKey(ifn);
+				/* hostapd's first status for the interface, asked after
+				   the reading was taken: the reading's state, not a move */
+				if (e && e.key !== key && e.key.indexOf('\n') === e.key.length - 1 && e.key === key.slice(0, e.key.length)) e.key = key;
+				return !e || e.key !== key || !(iwAge >= 0 && iwAge < IWINFO_MS);
+			}
 			/* the link state of a switch with hosts behind it, every
 			   SWITCH_MS: each answer runs swconfig on the device. Asked
 			   on the side, so a slow switch holds up no poll; the answer
@@ -719,26 +877,69 @@ return view.extend({
 			});
 			ifnames.forEach(function(ifn) {
 				per.push(L.resolveDefault(callAssoc(ifn), []).then(function(v) { return [ 'assoc', ifn, v ]; }));
-				per.push(hostapd(ifn, 'get_clients').then(function(v) { return [ 'hapd', ifn, v ]; }));
+				if (slow) per.push(hostapd(ifn, 'get_clients').then(function(v) { return [ 'hapd', ifn, v ]; }));
 				per.push(hostapd(ifn, 'get_status').then(function(v) { return [ 'hapdStatus', ifn, v ]; }));
-				per.push(L.resolveDefault(callIwInfo(ifn), {}).then(function(v) { return [ 'iwinfo', ifn, v ]; }));
+				if (slow && (radioFirst[ifn] || !hapdKnown[ifn]) && iwDue(ifn))
+					per.push(L.resolveDefault(callIwInfo(ifn), {}).then(function(v) { return [ 'iwinfo', ifn, v ]; }));
+				if (slow && surveyFor[ifn])
+					per.push(L.resolveDefault(callSurvey(ifn), null).then(function(v) { return [ 'survey', ifn, v ]; }));
 			});
 			return Promise.all(per).then(function(parts) {
-				var assoc = Object.create(null), hapd = Object.create(null), hapdStatus = Object.create(null), iwinfo = Object.create(null);
+				var assoc = Object.create(null), hapdStatus = Object.create(null);
+				var hapd = slow ? Object.create(null) : kept.hapd, iwinfo = slow ? Object.create(null) : kept.iwinfo;
+				var survey = slow ? Object.create(null) : (kept.survey || Object.create(null));
 				parts.forEach(function(p) {
 					if (p[0] === 'assoc') assoc[p[1]] = p[2];
 					else if (p[0] === 'hapd') hapd[p[1]] = p[2];
 					else if (p[0] === 'hapdStatus') hapdStatus[p[1]] = p[2];
-					else iwinfo[p[1]] = p[2];
+					else if (p[0] === 'survey') { if (Array.isArray(p[2])) survey[p[1]] = p[2]; }
+					else {
+						iwinfo[p[1]] = p[2];
+						/* a failed call ({}) is asked again at the next poll */
+						if (p[2] && typeof p[2] === 'object' && Object.keys(p[2]).length) iwc[p[1]] = { at: started, key: iwKey(p[1]), reply: p[2] };
+						else delete iwc[p[1]];
+					}
+				});
+				/* the readings kept for the interfaces not asked this poll;
+				   one no longer asked at all (another network hostapd now
+				   answers for: its BSSID and SSID are hostapd's) is dropped,
+				   not shown from its first poll on */
+				var wantIw = function(ifn) {
+					var h = hapdStatus[ifn];
+					return ifnames.indexOf(ifn) >= 0 && (radioFirst[ifn] || !(h && typeof h.bssid === 'string' && h.bssid));
+				};
+				Object.keys(iwc).forEach(function(ifn) { if (!wantIw(ifn)) delete iwc[ifn]; });
+				if (slow) Object.keys(iwc).forEach(function(ifn) { if (!(ifn in iwinfo)) iwinfo[ifn] = iwc[ifn].reply; });
+				self.hapdLast = hapdStatus;
+				/* kept only when all three answered: a failure is asked again
+				   at the next poll, not shown for LOW_SLOW_MS */
+				if (slow && r[4] != null && r[6] != null && r[7] != null) {
+					self.slowAt = started;
+					self.slowCache = { wifi: r[4], thermal: r[6], wired: r[7], hapd: hapd, iwinfo: iwinfo, survey: survey };
+				}
+				/* a station or wired host seen for the first time: its name
+				   may be in the next host hints */
+				var known = self.knownMacs || (self.knownMacs = new Set()), fresh = false, first = !self.macsSeen;
+				var note = function(s) { if (s && typeof s.mac === 'string' && !known.has(s.mac)) { known.add(s.mac); fresh = true; } };
+				Object.keys(assoc).forEach(function(ifn) { (Array.isArray(assoc[ifn]) ? assoc[ifn] : []).forEach(note); });
+				(Array.isArray(wiredReply.hosts) ? wiredReply.hosts : []).forEach(note);
+				/* bounded: a flood of made-up addresses starts the set over */
+				if (known.size > 4096) self.knownMacs = null;
+				self.macsSeen = true;
+				if (fresh && !first) self.hintsHot = HINTS_HOT;
+				self.hapdBss = Object.create(null);
+				Object.keys(hapdStatus).forEach(function(ifn) {
+					var h = hapdStatus[ifn];
+					if (h && typeof h.bssid === 'string' && h.bssid) self.hapdBss[ifn] = true;
 				});
 				var switchState = Object.create(null);
 				Object.keys(swState).forEach(function(n) { switchState[n] = swState[n].ports; });
-				return { info: r[0] || {}, stat: r[1] || '', ifaces: r[2] || [], devs: r[3] || {}, wifi: wifiDevs, hints: r[5] || {}, thermal: r[6] || [],
+				return { info: r[0] || {}, stat: r[1] || '', ifaces: r[2] || [], devs: r[3] || {}, wifi: wifiDevs, hints: r[5] || self.hintsCache || {}, thermal: r[6] || [],
 					fdb: Array.isArray(wiredReply.hosts) ? wiredReply.hosts : [], fdbCrowded: wiredReply.crowded === true, switches: switches, switchState: switchState,
 					/* no answer (an older plugin, a lookup not sent, a failed call)
 					   keeps the last one: no tunnel blinking off */
 					routes: r[8] && Array.isArray(r[8].routes) ? (self.kernelRoutes = r[8].routes) : (self.kernelRoutes || null),
-					assoc: assoc, hapd: hapd, hapdStatus: hapdStatus, iwinfo: iwinfo, at: Date.now(), started: started };
+					assoc: assoc, hapd: hapd, hapdStatus: hapdStatus, iwinfo: iwinfo, survey: survey, at: Date.now(), started: started };
 			});
 		});
 	},
@@ -762,8 +963,9 @@ return view.extend({
 			});
 		this.board = data.board || {};
 		this.canWrite = data.canWrite;
+		var held = heldCpu(readCpu(), now);
 		this.st = {
-			clock: null, stat: null, cpu: null,
+			clock: null, stat: null, cpu: held, cores: held ? held.cores.length : null, cpuMeasured: false,
 			devPrev: null, staPrev: null, devRates: Object.create(null), staRates: Object.create(null), radioRates: Object.create(null), ssidRates: Object.create(null),
 			hist: { net: net, cpu: series.valid(stored.cpu, 2, HIST_FAST, now), mem: series.valid(stored.mem, 2, HIST_MAX, now) },
 			clientHist: clientHist, bestStd: Object.create(null),
@@ -819,7 +1021,8 @@ return view.extend({
 		var stat = model.parseStat(raw.stat);
 		if (stat) {
 			var cpu = fast ? null : model.cpuUsage(st.stat, stat);
-			if (cpu) { st.cpu = cpu; series.push(st.hist.cpu, [ at, cpu.pct ], WINDOW_MS, HIST_FAST); }
+			if (cpu) { this.keepCpu(cpu, Date.now()); series.push(st.hist.cpu, [ at, cpu.pct ], WINDOW_MS, HIST_FAST); }
+			st.cores = stat.cores.length || st.cores;
 			if (!st.stat || stat.all.total !== st.stat.all.total) st.stat = stat;
 		}
 		st.temps = model.temps(raw.thermal);
@@ -902,11 +1105,11 @@ return view.extend({
 		Object.keys(st.clientHist).slice(0, 32).forEach(function(mac) {
 			keepClients[mac] = st.clientHist[mac].slice(-60).filter(function(p) { return p.every(function(v) { return isFinite(v); }); });
 		});
-		writeStore({ net: st.hist.net, cpu: st.hist.cpu, mem: st.hist.mem, clients: keepClients });
+		writeStore({ sid: storeOwner(), net: st.hist.net, cpu: st.hist.cpu, mem: st.hist.mem, clients: keepClients });
 
 		this.stickyGen(m);
 		m.clients.forEach(function(c) { c.exp = insight.experience(c); c.firstSeen = p.state.firstSeen[c.mac]; c.isNew = !!p.isNew[c.mac]; });
-		st.health = insight.health(m, { cpu: st.cpu, uplinkRate: st.uplinkRate, temps: st.temps });
+		st.health = insight.health(m, { cpu: this.cpuShown(), uplinkRate: st.uplinkRate, temps: st.temps, quiet: this.quiet });
 		st.summary = insight.summary(st.health);
 		st.radioInsights = insight.radioInsights(m.radios, st.radioRates);
 		st.talkers = insight.topTalkers(m.clients, st.staRates, TALKERS);
@@ -955,9 +1158,21 @@ return view.extend({
 
 	/* every FAST_S: CPU from /proc/stat and the uplink device's counters,
 	   with their own previous samples, so the two lanes never mix */
+	/* one fast sample at a time: the lane's tick and the first reading's
+	   early second sample (cpuSoon) share a call in flight, so no older
+	   reply lands after a newer one */
 	refreshFast: function() {
+		var self = this;
+		if (this.fastBusy) return this.fastBusy;
+		var p = this.fastSample(), done = function() { if (self.fastBusy === p) self.fastBusy = null; };
+		this.fastBusy = p;
+		p.then(done, done);
+		return p;
+	},
+
+	fastSample: function() {
 		var self = this, st = this.st, up = this.m && this.m.uplink, dev = up && up.statsDev;
-		if (document.hidden || !this.el) return Promise.resolve();
+		if (document.hidden || !this.el || this.idle()) return Promise.resolve();
 		return Promise.all([
 			L.resolveDefault(callRead('/proc/stat'), ''),
 			dev ? L.resolveDefault(callDev(dev), null) : Promise.resolve(null)
@@ -973,8 +1188,13 @@ return view.extend({
 			var stat = model.parseStat(r[0]);
 			if (stat) {
 				var cpu = model.cpuUsage(st.fastStat, stat);
-				if (cpu) { st.cpu = cpu; series.push(st.hist.cpu, [ at, cpu.pct ], WINDOW_MS, HIST_FAST); changed = true; }
+				if (cpu) { self.keepCpu(cpu, now); series.push(st.hist.cpu, [ at, cpu.pct ], WINDOW_MS, HIST_FAST); changed = true; }
+				/* no reading yet on this page: the second sample a second
+				   after this one, not at the lane's next tick */
+				else if (!st.cpuMeasured && !self.cpuSoon)
+					self.cpuSoon = window.setTimeout(function() { self.cpuSoon = 0; self.refreshFast(); }, CPU_FIRST_MS);
 				if (!st.fastStat || stat.all.total !== st.fastStat.all.total) st.fastStat = stat;
+				st.cores = stat.cores.length || st.cores;
 			}
 			var s = r[1] && r[1].statistics, counters = Object.create(null);
 			if (dev && s) counters[dev] = { rx: s.rx_bytes, tx: s.tx_bytes };
@@ -987,12 +1207,32 @@ return view.extend({
 		});
 	},
 
+	/* the CPU reading to show: the last one; before the first, once the
+	   first sample is in (the second follows within CPU_FIRST_MS), 0 % on
+	   every core rather than a dash; null while the router has given no
+	   sample at all */
+	cpuShown: function() {
+		var st = this.st, zero = [];
+		if (st.cpu) return st.cpu;
+		if (!(st.cores > 0)) return null;
+		for (var i = 0; i < st.cores; i++) zero.push(0);
+		return { pct: 0, cores: zero };
+	},
+
+	/* a CPU reading: shown, and kept for the next page (heldCpu) */
+	keepCpu: function(cpu, now) {
+		var d = now - (this.cpuSavedAt || 0);
+		this.st.cpu = cpu;
+		this.st.cpuMeasured = true;
+		if (!(d >= 0 && d < CPU_SAVE_MS)) { this.cpuSavedAt = now; writeCpu({ pct: cpu.pct, cores: cpu.cores, t: now }); }
+	},
+
 	/* what a fast sample moves: the cards, the verdict, the path's uplink
 	   wire and backdrop, the System tile's CPU, the throughput chart */
 	paintFast: function() {
 		var st = this.st;
 		if (!this.m || !this.el || !this.el.root) return;
-		st.health = insight.health(this.m, { cpu: st.cpu, uplinkRate: st.uplinkRate, temps: st.temps });
+		st.health = insight.health(this.m, { cpu: this.cpuShown(), uplinkRate: st.uplinkRate, temps: st.temps, quiet: this.quiet });
 		st.summary = insight.summary(st.health);
 		this.paintHead();
 		this.paintHealth();
@@ -1059,7 +1299,7 @@ return view.extend({
 		this.stickyGen(m);
 		m.clients.forEach(function(c) { c.exp = insight.experience(c); c.firstSeen = st.presence && st.presence.firstSeen[c.mac]; c.isNew = !!st.isNew[c.mac]; });
 		st.talkers = insight.topTalkers(m.clients, st.staRates, TALKERS);
-		st.health = insight.health(m, { cpu: st.cpu, uplinkRate: st.uplinkRate, temps: st.temps });
+		st.health = insight.health(m, { cpu: this.cpuShown(), uplinkRate: st.uplinkRate, temps: st.temps, quiet: this.quiet });
 		st.summary = insight.summary(st.health);
 		this.m = m;
 		this.paint();
@@ -1070,8 +1310,15 @@ return view.extend({
 		if (document.hidden) { this.st.paused = true; this.paintLive(); return Promise.resolve(); }
 		/* back from a hidden tab: CPU starts over, rather than read as the
 		   average over the time nobody was looking */
-		if (this.st.paused) this.st.stat = null;
-		this.st.paused = false;
+		if (this.st.paused) { this.st.stat = null; this.st.paused = false; this.paintLive(); }
+		/* one at a time; and none within 2 s of the last one's start (load()
+		   has just asked for all of it, and a poll loop that starts runs what
+		   it holds at once), or, idle (Low-power router), within
+		   LOW_IDLE_POLL_MS; a clock stepped back counts as time gone */
+		var since = Date.now() - (this.fullAt || 0);
+		if (this.fetching || (since >= 0 && since < (this.idle() ? LOW_IDLE_POLL_MS : 2000))) return Promise.resolve();
+		this.fullAt = Date.now();
+		this.fetching = true;
 		return this.fetch().then(function(raw) {
 			self.ingest(raw);
 			self.st.lastOk = Date.now();
@@ -1080,7 +1327,32 @@ return view.extend({
 		}).catch(function(err) {
 			self.st.lastErr = err;
 			self.paintLive();
-		});
+		}).then(function() { self.fetching = false; });
+	},
+
+	/* Low-power router, and nobody has touched the page for LOW_IDLE_MS */
+	idle: function() {
+		return lowPower() && Date.now() - (this.inputAt || 0) > LOW_IDLE_MS;
+	},
+
+	/* input: the page is watched; back from idle, live at once (unless
+	   LuCI's refresh is paused: its resume asks) */
+	noteInput: function() {
+		var was = this.idle();
+		this.inputAt = Date.now();
+		if (was && (typeof poll.active !== 'function' || poll.active())) this.refresh();
+	},
+
+	/* Low-power router switched (the theme's Appearance): the still
+	   picture reduced motion has (app.css .vt-low: busy wires as a still
+	   dotted line, no flow dots) and no backdrop; the pick stays for when
+	   it is off */
+	applyPower: function() {
+		var low = lowPower();
+		if (this.el && this.el.root) this.el.root.classList.toggle('vt-low', low);
+		if (this.backdrop) { this.backdrop.style(low ? 'none' : this.backdropStyle); this.kickMotion(); }
+		this.paintWireState();
+		this.paintLive();
 	},
 
 	/* ----------------------------------------------------------- render */
@@ -1104,6 +1376,20 @@ return view.extend({
 			this.buildDrawer()
 		]);
 		this.el.root = root;
+		root.classList.toggle('vt-low', lowPower());
+		this.clock = { anims: [], raf: 0, timer: 0, last: 0 };
+		root.addEventListener('animationstart', function(ev) { if (PULSE_NAME.test(ev.animationName || '')) self.adoptPulses(ev.target); });
+		/* a pulse CSS took away (.vt-still) or ended (reduced motion
+		   switched on: it turns finite, and a paused one stays "paused"):
+		   dropped here, the animation the event is for, and any other
+		   cancelled one; at the next step (stepMotion) when that comes
+		   first */
+		var dropPulses = function(ev) {
+			if (!PULSE_NAME.test(ev.animationName || '') || !self.clock) return;
+			self.clock.anims = self.clock.anims.filter(function(x) { return !pulseOf(x.a, ev) && x.a.playState !== 'idle'; });
+		};
+		root.addEventListener('animationcancel', dropPulses);
+		root.addEventListener('animationend', dropPulses);
 		/* wires follow the nodes' geometry: redrawn when the path or a
 		   node changes size (observer callbacks run after layout, so the
 		   reads there force nothing), never on a poll that moves nothing */
@@ -1111,12 +1397,31 @@ return view.extend({
 
 		this.paint();
 
-		poll.add(L.bind(this.refresh, this), POLL_S);
+		/* the fast lane first: a poll loop that starts here runs what it
+		   holds at once, and load() has just asked for everything the full
+		   poll would; the fast lane's first run only takes CPU's baseline,
+		   after the page's own requests, so its first reading (at FAST_S)
+		   is not the router building this page (#101) */
+		this.inputAt = this.fullAt = Date.now();
 		poll.add(L.bind(this.refreshFast, this), FAST_S);
+		poll.add(L.bind(this.refresh, this), POLL_S);
+		window.addEventListener('vantage:power', function() { self.applyPower(); });
+		[ 'pointerdown', 'pointermove', 'keydown', 'wheel', 'touchstart', 'focus' ].forEach(function(t) {
+			window.addEventListener(t, function() { self.noteInput(); }, { passive: true });
+		});
+		this.focused = typeof document.hasFocus !== 'function' || document.hasFocus();
+		window.addEventListener('blur', function() { self.focused = false; self.paintLive(); });
+		window.addEventListener('focus', function() { self.focused = true; self.paintLive(); });
 		document.addEventListener('visibilitychange', function() {
-			if (!document.hidden && self.st.paused) self.refresh();
+			/* the tab shown again: someone is looking */
+			if (!document.hidden) self.inputAt = Date.now();
+			if (!document.hidden && self.st.paused && poll.active()) self.refresh();
 			else self.paintLive();
 		});
+		/* LuCI's refresh paused or resumed from its indicator; on resume
+		   CPU starts over, rather than read as the average over the pause */
+		document.addEventListener('poll-stop', function() { window.setTimeout(function() { self.paintLive(); }, 0); });
+		document.addEventListener('poll-start', function() { self.st.stat = null; self.paintLive(); });
 		document.addEventListener('keydown', L.bind(this.handleKey, this));
 		window.setInterval(function() { self.paintLive(); }, 1000);
 		if (window.ResizeObserver) {
@@ -1429,7 +1734,7 @@ return view.extend({
 	   Vantage theme it is in Appearance instead (menu-vantage.js) */
 	buildBackdropPick: function() {
 		if (vantageTheme()) return '';
-		var self = this, names = { 'grid': _('Grid packets'), 'stars': _('Starfield'), 'none': _('None') };
+		var self = this, names = { 'grid': _('Grid'), 'stars': _('Starfield'), 'none': _('None') };
 		var pick = E('select', { 'class': 'vt-select', 'id': 'vt-backdrop-style', 'change': function(ev) { self.setBackdrop(ev.target.value); } },
 			backdrop.STYLES.map(function(k) { return E('option', { 'value': k }, [ names[k] ]); }));
 		pick.value = this.backdropStyle;
@@ -1449,7 +1754,7 @@ return view.extend({
 	showBackdrop: function(v) {
 		if (backdrop.STYLES.indexOf(v) < 0 || v === this.backdropStyle) return;
 		this.backdropStyle = v;
-		if (this.backdrop) this.backdrop.style(v);
+		if (this.backdrop) { this.backdrop.style(lowPower() ? 'none' : v); this.kickMotion(); }
 		if (this.backdropPick && this.backdropPick.value !== v) this.backdropPick.value = v;
 	},
 
@@ -1669,6 +1974,9 @@ return view.extend({
 	paintHead: function() {
 		var s = this.st.summary, clients = this.m.clients.length;
 		this.el.orb.className = 'vt-orb vt-orb-' + s.level;
+		/* the Vantage theme's refresh dot pulses fast in the same colour
+		   while something needs attention (vantage.css) */
+		document.documentElement.setAttribute('data-vt-alert', s.level === 'warn' || s.level === 'err' ? s.level : '');
 		txt(this.el.headline, s.headline);
 		txt(this.el.subline, this.identity(this.m.device).concat(
 			this.m.wired ? [] : [ clients === 1 ? _('1 client') : _('%d clients').format(clients) ]).join('  ·  '));
@@ -1689,15 +1997,112 @@ return view.extend({
 	paintLive: function() {
 		if (!this.el || !this.el.live) return;
 		var st = this.st, state, label;
-		if (st.paused || document.hidden) { state = 'paused'; label = _('Paused while hidden'); }
+		/* LuCI's own refresh can be paused (its indicator in the header) */
+		var stopped = typeof poll.active === 'function' && !poll.active();
+		if (st.paused || document.hidden || stopped) { state = 'paused'; label = stopped && !document.hidden ? _('Paused') : _('Paused while hidden'); }
 		else if (st.lastErr) { state = 'err'; label = _('Reconnecting…', 'vantage'); }
 		else { state = 'ok'; label = _('Live') + ' · ' + fmt.ago(Date.now() - st.lastOk); }
 		this.el.live.className = 'vt-livepill vt-live-' + state;
+		/* the Vantage theme's refresh dot pulses fast and amber while this
+		   reconnects (vantage.css) */
+		document.documentElement.setAttribute('data-vt-live', state);
 		/* the Vantage theme's poll indicator already says the page is
-		   live: then this pill shows only when it is not */
-		this.el.live.hidden = state === 'ok' && vantageTheme();
+		   live, or that its refresh is paused: then this pill shows only
+		   when neither */
+		this.el.live.hidden = (state === 'ok' || stopped) && vantageTheme();
 		this.el.live.setAttribute('title', label);
 		txt(this.el.liveText, label);
+		this.setMotion(state !== 'paused' && this.focused !== false && !lowPower());
+	},
+
+	/* Nothing moves while the page is paused or another window has the
+	   focus (the numbers still update): the status circle's ring and the
+	   live beat (app.css, .vt-still), the flow dots stay where they are
+	   and the backdrop keeps its last frame. A moving part keeps the
+	   browser drawing every frame. */
+	setMotion: function(on) {
+		if (this.motionOn === on) return;
+		this.motionOn = on;
+		if (this.el && this.el.root) this.el.root.classList.toggle('vt-still', !on);
+		if (this.backdrop) this.backdrop.pause(!on);
+		if (!STEP_DOTS) {
+			var map = this.wireMap || {};
+			Object.keys(map).forEach(function(k) { map[k].anims.forEach(function(a) { if (on) a.play(); else a.pause(); }); });
+		}
+		/* the dots and the pulses stand where they are: the clock stops */
+		this.kickMotion();
+	},
+
+	/* ----------------------------------------------------- motion clock */
+
+	/* a CSS pulse that just started (the status circle's ring, the Live
+	   beat; animationstart bubbles from the element the pseudo-element
+	   belongs to): paused, and stepped by the clock from now on. One
+	   that CSS takes away (.vt-still, reduced motion) goes idle and is
+	   dropped at the next step */
+	adoptPulses: function(el) {
+		var c = this.clock;
+		if (!c || !el || typeof el.getAnimations !== 'function') return;
+		el.getAnimations({ subtree: true }).forEach(function(a) {
+			if (!a.effect || !PULSE_NAME.test(a.animationName || '') || a.playState !== 'running') return;
+			if (c.anims.some(function(x) { return x.a === a; })) return;
+			a.pause();
+			c.anims.push({ a: a, dur: pulseDuration(a), at: 0 });
+		});
+		this.kickMotion();
+	},
+
+	/* is there anything for the clock to move? */
+	motionBusy: function() {
+		var c = this.clock, map = this.wireMap || {};
+		if (!c || !this.motionOn) return false;
+		if (c.anims.length || (this.backdrop && this.backdrop.wants())) return true;
+		return STEP_DOTS && Object.keys(map).some(function(k) { return map[k].steps.length > 0; });
+	},
+
+	/* start the clock when it has work and is not running; it stops by
+	   itself when the work is gone */
+	kickMotion: function() {
+		var self = this, c = this.clock;
+		if (!c || c.raf || c.timer || !this.motionBusy()) return;
+		c.last = 0;
+		c.raf = window.requestAnimationFrame(function(t) { self.tickMotion(t); });
+	},
+
+	tickMotion: function(t) {
+		var self = this, c = this.clock;
+		c.raf = 0;
+		if (!this.motionBusy()) { c.last = 0; return; }
+		/* the first tick after a rest, or a frame the browser held back
+		   (a hidden tab), moves nothing far */
+		var dt = c.last ? Math.min(t - c.last, 4 * MOTION_MS) : 0;
+		c.last = t;
+		this.stepMotion(dt, t);
+		var period = this.backdrop && this.backdrop.wants() ? this.backdrop.period() : MOTION_MS;
+		/* the wait ends a little early, the browser's next frame is the one */
+		c.timer = window.setTimeout(function() {
+			c.timer = 0;
+			if (!c.raf) c.raf = window.requestAnimationFrame(function(t) { self.tickMotion(t); });
+		}, Math.max(0, period - 12));
+	},
+
+	/* dt ms on: the pulses, the dots at their wires' speeds, the
+	   backdrop's frame; then the theme's clock (vantage:tick) */
+	stepMotion: function(dt, t) {
+		var c = this.clock, map = this.wireMap || {};
+		/* one CSS cancelled since the last step is dropped, not stepped: a
+		   time written to a cancelled animation brings it back, paused,
+		   with nothing left to stop it (its animationcancel comes after) */
+		c.anims = c.anims.filter(function(x) { return x.a.playState !== 'idle'; });
+		c.anims.forEach(function(x) { stepAnim(x, dt); });
+		if (STEP_DOTS) Object.keys(map).forEach(function(k) {
+			var g = map[k], rate = wires.rate(g.speed);
+			g.steps.forEach(function(x) { stepAnim(x, dt * rate); });
+		});
+		if (this.backdrop) this.backdrop.frame(t);
+		var ev = null;
+		try { ev = new CustomEvent(MOTION_EVENT, { detail: { dt: dt, t: t } }); } catch (e) { ev = null; }
+		if (ev && typeof window.dispatchEvent === 'function') window.dispatchEvent(ev);
 	},
 
 	/* ----------------------------------------------------------- health */
@@ -1842,7 +2247,7 @@ return view.extend({
 			el.path
 		]));
 		/* packets or stars behind the path, moved by the uplink's rate */
-		this.backdrop = backdrop.mount(tile, el.path, this.backdropStyle);
+		this.backdrop = backdrop.mount(tile, el.path, lowPower() ? 'none' : this.backdropStyle, { external: true });
 		return tile;
 	},
 
@@ -2073,7 +2478,7 @@ return view.extend({
 		txt(h.apUp, d.uptime != null ? _('up %s').format(fmt.duration(d.uptime)) : '');
 		h.upActive = !!(upR && upR.rx + upR.tx > 50e3);
 		h.upRate = upR ? upR.rx + upR.tx : 0;
-		if (this.backdrop) this.backdrop.update({ down: upR ? upR.rx : null, up: upR ? upR.tx : null, origin: h.ap });
+		if (this.backdrop) { this.backdrop.update({ down: upR ? upR.rx : null, up: upR ? upR.tx : null, origin: h.ap }); this.kickMotion(); }
 
 		var lines = Object.create(null);
 		this.extraLines().forEach(function(x) { lines[x.iface] = x; });
@@ -2232,7 +2637,7 @@ return view.extend({
 			seen[w.key] = true;
 			var g = map[w.key];
 			if (!g) {
-				g = map[w.key] = { base: svgPath('', 'vt-wire'), flow: svgPath('', 'vt-flow'), fw: E('div', { 'class': 'vt-fwire' }), dots: [], anims: [], d: null };
+				g = map[w.key] = { base: svgPath('', 'vt-wire'), flow: svgPath('', 'vt-flow'), fw: E('div', { 'class': 'vt-fwire' }), dots: [], anims: [], steps: [], d: null };
 				svg.appendChild(g.base);
 				svg.appendChild(g.flow);
 				self.el.flows.appendChild(g.fw);
@@ -2261,7 +2666,7 @@ return view.extend({
 
 	/* which wires carry traffic and how fast: classes only, no geometry */
 	paintWireState: function() {
-		var self = this, map = this.wireMap, still = reducedMotion() || !!this.flowsHidden;
+		var self = this, map = this.wireMap, still = reducedMotion() || !!this.flowsHidden || lowPower();
 		if (!map) return;
 		this.wireList().forEach(function(w) {
 			var g = map[w.key];
@@ -2297,15 +2702,21 @@ return view.extend({
 		g.dotsFor = g.d;
 		if (!g.samples || g.samples.length < 2 || !(g.len >= 8) || typeof g.fw.animate !== 'function') return;
 		var n = wires.dots(g.len), dur = wires.trip(g.len), rate = wires.rate(speed);
+		g.steps = [];
 		for (var i = 0; i < n; i++) {
 			var dot = E('span', { 'class': 'vt-fdot' });
 			g.fw.appendChild(dot);
-			/* every dot takes the whole trip, started i/n of the way along */
-			var a = dot.animate(wires.keyframes(g.samples), { duration: dur, delay: -dur * i / n, iterations: Infinity, easing: 'linear' });
+			/* every dot takes the whole trip, started i/n of the way along;
+			   paused: the clock moves it (stepMotion), at the wire's rate */
+			var a = dot.animate(wires.keyframes(g.samples), { duration: dur, iterations: Infinity, easing: 'linear' });
 			a.playbackRate = rate;
+			a.currentTime = dur * i / n;
+			if (STEP_DOTS) { a.pause(); g.steps.push({ a: a, dur: dur, at: dur * i / n }); }
+			else if (this.motionOn === false) a.pause();
 			g.dots.push(dot);
 			g.anims.push(a);
 		}
+		this.kickMotion();
 	},
 
 	clearDots: function(g) {
@@ -2313,6 +2724,7 @@ return view.extend({
 		g.anims.forEach(function(a) { a.cancel(); });
 		g.dots.forEach(function(d) { if (d.parentNode) d.parentNode.removeChild(d); });
 		g.anims = [];
+		g.steps = [];
 		g.dots = [];
 		g.dotsFor = null;
 	},
@@ -2363,7 +2775,7 @@ return view.extend({
 	},
 
 	paintSystem: function() {
-		var el = this.el, d = this.m.device, cpu = this.st.cpu;
+		var el = this.el, d = this.m.device, cpu = this.cpuShown();
 		txt(el.sysUptime, d.uptime != null ? _('Up %s').format(fmt.duration(d.uptime)) : '');
 		txt(el.cpuVal, cpu ? Math.round(cpu.pct) + '%' : fmt.DASH);
 		el.cpuVal.className = 'vt-big vt-tn' + (cpu && cpu.pct >= 90 ? ' vt-t-err' : cpu && cpu.pct >= 70 ? ' vt-t-warn' : '');
@@ -2429,7 +2841,8 @@ return view.extend({
 		}));
 		patch(el.fw, [
 			E('span', {}, [ d.firmware || '' ]),
-			d.kernel ? E('span', { 'class': 'vt-hint' }, [ _('Kernel %s').format(d.kernel) ]) : ''
+			d.kernel ? E('span', { 'class': 'vt-hint' }, [ _('Kernel %s').format(d.kernel) ]) : '',
+			E('span', { 'class': 'vt-hint' }, [ 'Vantage ' + VERSION ])
 		]);
 	},
 
@@ -2519,8 +2932,8 @@ return view.extend({
 				var x = (1 - k * 60000 / dm.span) * W;
 				svg.appendChild(svgPath('M' + x.toFixed(1) + ' 0V' + H, 'vt-chart-vgrid'));
 			});
-			var segD = series.trace(d, s.dn, dm.t0, dm.t1, W, H, POLL_S * 3500, g.dn.frac);
-			var segU = series.trace(d, s.up, dm.t0, dm.t1, W, H, POLL_S * 3500, g.up.frac);
+			var segD = series.trace(d, s.dn, dm.t0, dm.t1, W, H, gapMs(), g.dn.frac);
+			var segU = series.trace(d, s.up, dm.t0, dm.t1, W, H, gapMs(), g.up.frac);
 			[ [ segD, g.dn, '' ], [ segU, g.up, ' vt-dir-up' ] ].forEach(function(h) {
 				var area = svgPath(series.curveArea(h[0], h[1].base * H), 'vt-series-area' + h[2]);
 				area.setAttribute('fill', fadeFill(svg, h[1].flip, h[2].trim()));
@@ -2564,7 +2977,7 @@ return view.extend({
 				]),
 				E('div', { 'class': 'vt-mult-plot vt-chart-' + style }, [
 					svg
-				].concat(sd.n ? g.labels.map(scaleLabel) : [], series.gaps(d, dm.t0, dm.t1, POLL_S * 3500).map(gapBand), [
+				].concat(sd.n ? g.labels.map(scaleLabel) : [], series.gaps(d, dm.t0, dm.t1, gapMs()).map(gapBand), [
 					sd.n < 2 ? E('span', { 'class': 'vt-sk-note' }, [ _('collecting…') ]) : '',
 					tailDot(segD, ''),
 					tailDot(segU, ' vt-dir-up'),
@@ -2689,7 +3102,7 @@ return view.extend({
 		dom.content(this.el.radioSum, m.radios.map(function(r) {
 			var rr = st.radioRates[r.id];
 			return E('button', { 'type': 'button', 'class': 'vt-rsum', 'click': function() { self.openDrawer('radio', r.id); } }, [
-				E('span', { 'class': 'vt-status vt-status-' + (r.disabled ? 'warn' : r.up ? 'ok' : 'err'), 'aria-hidden': 'true' }),
+				E('span', { 'class': 'vt-status vt-status-' + (r.disabled ? 'off' : r.up ? 'ok' : 'err'), 'aria-hidden': 'true' }),
 				bandBadge(r.band),
 				E('span', { 'class': 'vt-rsum-main vt-tn' }, [ r.channel ? _('Ch %d · %d MHz').format(r.channel, r.width || 20) : fmt.DASH ]),
 				E('span', { 'class': 'vt-rsum-sub vt-tn' }, [ r.clients === 1 ? _('1 client') : _('%d clients').format(r.clients) ]),
@@ -2718,7 +3131,7 @@ return view.extend({
 				E('header', { 'class': 'vt-radio-head' }, [
 					bandBadge(r.band),
 					E('span', { 'class': 'vt-radio-name' }, [ r.gen || r.id ]),
-					E('span', { 'class': 'vt-status vt-status-' + (r.disabled ? 'warn' : r.up ? 'ok' : 'err') }, [ r.disabled ? _('Disabled') : r.up ? _('Up', 'vantage') : _('Down', 'vantage') ]),
+					E('span', { 'class': 'vt-status vt-status-' + (r.disabled ? 'off' : r.up ? 'ok' : 'err') }, [ r.disabled ? _('Disabled') : r.up ? _('Up', 'vantage') : _('Down', 'vantage') ]),
 					E('button', { 'type': 'button', 'class': 'vt-icon-action', 'title': _('Radio details'), 'aria-label': _('Radio details'),
 						'click': function() { self.openDrawer('radio', r.id); } }, [ icon('chevron') ])
 				]),
@@ -2867,7 +3280,7 @@ return view.extend({
 			hay = [ c.name, c.macLabel, c.mac, c.vendor, c.port, c.network, c.nameSourceLabel ];
 		}
 		else {
-			if (chip === 'weak' && !(c.signal != null && c.signal < insight.WEAK_DBM)) return false;
+			if (chip === 'weak' && !this.isWeak(c)) return false;
 			if (chip === 'new' && !c.isNew) return false;
 			if (chip === 'active' && !(this.st.staRates[c.mac] && this.st.staRates[c.mac].rx + this.st.staRates[c.mac].tx > 8000)) return false;
 			if (/^band:/.test(chip) && c.band !== chip.slice(5)) return false;
@@ -2880,7 +3293,7 @@ return view.extend({
 
 	/* the quick filters of the list shown: [ id, label, count, warn ] */
 	filterDefs: function() {
-		var m = this.m, st = this.st, out;
+		var self = this, m = this.m, st = this.st, out;
 		if (this.ui.kind === 'wired') {
 			var hosts = m.wiredHosts, ports = [];
 			out = [ [ 'all', _('All'), hosts.length ] ];
@@ -2893,7 +3306,7 @@ return view.extend({
 		m.clients.forEach(function(c) { if (c.band && bands.indexOf(c.band) < 0) bands.push(c.band); });
 		bands.sort().forEach(function(b) { out.push([ 'band:' + b, wifi.bandLabel(b), m.clients.filter(function(c) { return c.band === b; }).length ]); });
 		out.push([ 'active', _('Active'), m.clients.filter(function(c) { var r = st.staRates[c.mac]; return r && r.rx + r.tx > 8000; }).length ]);
-		out.push([ 'weak', _('Weak signal'), m.clients.filter(function(c) { return c.signal != null && c.signal < insight.WEAK_DBM; }).length, true ]);
+		out.push([ 'weak', _('Weak signal'), m.clients.filter(function(c) { return self.isWeak(c); }).length, true ]);
 		out.push([ 'new', _('New', 'vantage'), m.clients.filter(function(c) { return c.isNew; }).length ]);
 		return out;
 	},
@@ -3342,6 +3755,13 @@ return view.extend({
 
 		var r = c.gone ? null : st.staRates[c.mac], hist = st.clientHist[c.mac] || [];
 		var exp = c.exp || insight.experience(c);
+		/* #110: a weak station far away on purpose can be left out of the
+		   warnings; shown while it is weak or set so, and then kept while
+		   its details are open (a signal around the line would make the
+		   row come and go under the pointer) */
+		var quietOn = !!(this.quiet && this.quiet[c.mac]);
+		if (quietOn || (c.signal != null && c.signal < insight.WEAK_DBM)) this.quietShown = c.mac;
+		var quietRow = !c.gone && (quietOn || this.quietShown === c.mac) ? this.quietRow(c, quietOn) : '';
 		var radio = this.m.radios.filter(function(x) { return x.id === c.radio; })[0];
 
 		var title = this.drawerWho(c);
@@ -3358,6 +3778,7 @@ return view.extend({
 			c.gone ? E('div', { 'class': 'vt-banner vt-banner-muted' }, [ icon('info'), E('span', {}, [ _('Disconnected %s; shown from the last sample.').format(fmt.ago(Date.now() - c.goneAt)) ]) ]) : '',
 			E('div', { 'class': 'vt-dactions' }, [ rename, pageLink(insight.PAGES.wireless, _('Wireless settings')) ]),
 			this.el.renameSlot = E('div', { 'class': 'vt-rename-slot' }),
+			quietRow,
 			c.gone ? '' : E('div', { 'class': 'vt-expcard vt-expcard-' + exp.level }, [
 				E('div', { 'class': 'vt-ring vt-tn' }, [ this.ring(exp.score), E('span', { 'class': 'vt-ring-n' }, [ String(exp.score) ]) ]),
 				E('div', { 'class': 'vt-expcard-text' }, [
@@ -3538,6 +3959,61 @@ return view.extend({
 		});
 	},
 
+	/* #110: whether a station's weak signal stays out of the warnings; a
+	   checkbox for a login that may name stations, else a line when set */
+	quietRow: function(c, on) {
+		var self = this, key = names.normMac(c.mac), busy = this.quietBusy || {}, said = this.quietSaid || {};
+		if (!this.canWrite) return on ? E('p', { 'class': 'vt-quiet vt-muted' }, [ _('Its weak signal is left out of the warnings.') ]) : '';
+		var box = E('input', { 'type': 'checkbox' });
+		/* the drawer is rebuilt on every poll: what is under way and what
+		   the last attempt said come from the view, not this row */
+		box.checked = on;
+		box.disabled = !!busy[key];
+		box.addEventListener('change', function() { box.disabled = true; self.saveQuiet(c.mac, box.checked); });
+		return E('label', { 'class': 'vt-quiet' }, [ box, E('span', {}, [ _('Don\'t warn about its signal') ]),
+			E('span', { 'class': 'vt-quiet-err', 'role': 'status' }, [ said[key] || '' ]) ]);
+	},
+
+	/* a weak signal the warnings count: not a station set quiet (#110) */
+	isWeak: function(c) {
+		return c.signal != null && c.signal < insight.WEAK_DBM && !(this.quiet && this.quiet[c.mac]);
+	},
+
+	/* sent to luci.vantage set_quiet, which keeps one quiet section per
+	   MAC in /etc/config/vantage and commits it at once (as set_alias);
+	   reloaded after every attempt, and the health checks with it.
+	   -> Promise<true | false | string (error text)> */
+	saveQuiet: function(mac, on) {
+		var self = this, key = names.normMac(mac);
+		this.quietBusy = this.quietBusy || {};
+		this.quietSaid = this.quietSaid || {};
+		if (!key || this.quietBusy[key]) return Promise.resolve(false);
+		this.quietBusy[key] = true;
+		delete this.quietSaid[key];
+		return Promise.resolve(callSetQuiet(key, on === true)).then(function(r) {
+			if (r && typeof r === 'object' && r.ok === true) return true;
+			switch (r && typeof r === 'object' ? r.error : null) {
+			case 'too-many': return _('This device already keeps %d of these; turn some off first.').format(names.QUIET_MAX);
+			case 'failed': return _('The device could not write /etc/config/vantage.');
+			}
+			return false;
+		}, function() { return false; }).then(function(res) {
+			delete self.quietBusy[key];
+			if (res !== true) self.quietSaid[key] = typeof res === 'string' ? res : _('Could not save this.');
+			var done = function() { self.rehealth(); return res; };
+			return self.loadAliases().then(done, done);
+		});
+	},
+
+	/* the health checks again, after a station was set quiet or not */
+	rehealth: function() {
+		var st = this.st;
+		if (!this.m || !st) return;
+		st.health = insight.health(this.m, { cpu: this.cpuShown(), uplinkRate: st.uplinkRate, temps: st.temps, quiet: this.quiet });
+		st.summary = insight.summary(st.health);
+		this.paint();
+	},
+
 	/* set_alias refusal -> message; false for anything else (no grant, no
 	   plugin, transport error) */
 	aliasError: function(r) {
@@ -3650,7 +4126,7 @@ return view.extend({
 	},
 
 	drawerDevice: function() {
-		var d = this.m.device, cpu = this.st.cpu;
+		var d = this.m.device, cpu = this.cpuShown();
 		return {
 			title: [ E('span', { 'class': 'vt-drawer-ico' }, [ icon('ap') ]), E('div', { 'class': 'vt-drawer-titles' }, [
 				E('div', { 'class': 'vt-drawer-name' }, [ d.model ]),

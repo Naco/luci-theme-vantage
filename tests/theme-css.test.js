@@ -120,12 +120,24 @@ test('720px: phone rules and desktop rules split without a gap, and the menu scr
 	assert.match(menuJs, /this\.mqMobile = window\.matchMedia\('\(max-width: 720px\)'\);/);
 });
 
-test('nothing pulses: the only endless animations are spinners; the compact poll pill is a pause / play button', () => {
+test('only the refresh dot pulses besides spinners: softly, fast while the dashboard reconnects, warns or errs; no login dot (#100)', () => {
 	const endless = themeRules.filter(r => /animation(-iteration-count)?:[^;]*infinite/.test(r.body));
-	assert.ok(endless.length >= 2, 'found the spinners');
+	assert.ok(endless.length >= 4, 'found the spinners and the ring');
 	for (const r of endless)
-		for (const s of r.sel) assert.match(s, /spinning|^#modal_overlay > \.modal/, 'endless animation on ' + s);
-	assert.doesNotMatch(themeCss, /@keyframes vt-live\b/);
+		for (const s of r.sel) assert.match(s, /spinning|^#modal_overlay > \.modal|poll-status"\]\[data-style="active"\]::after$/, 'endless animation on ' + s);
+	const ring = sel => themeRules.find(r => !r.media && r.sel.includes(sel));
+	const sec = r => parseFloat(/animation:\s*\S+\s+([\d.]+)s/.exec(r.body)[1]);
+	const soft = ring('#indicators > span[data-indicator="poll-status"][data-style="active"]::after');
+	const fast = ring('html[data-vt-live="err"] #indicators > span[data-indicator="poll-status"][data-style="active"]::after');
+	assert.match(soft.body, /animation:\s*vt-live-soft\b/);
+	assert.match(fast.body, /animation:\s*vt-live\b/);
+	assert.ok(sec(soft) > sec(fast), 'a problem pulses faster');
+	assert.ok(fast.sel.includes('html[data-vt-alert="warn"] #indicators > span[data-indicator="poll-status"][data-style="active"]::after'), 'a warning: amber and fast, as reconnecting');
+	const red = ring('html[data-vt-alert="err"] #indicators > span[data-indicator="poll-status"][data-style="active"]::after');
+	assert.match(red.body, /var\(--err\)/);
+	assert.equal(sec(red), sec(fast), 'an error: red, as fast');
+	assert.ok(themeRules.indexOf(red) > themeRules.indexOf(fast), 'an error wins over a warning or a reconnect');
+	assert.ok(!themeRules.some(r => r.sel.some(s => /data-style="inactive"/.test(s)) && /animation:/.test(r.body)), 'paused: still');
 	assert.doesNotMatch(themeCss, /vt-login-dot/);
 	/* the dot is a status colour, never the accent */
 	const dot = themeRules.find(r => !r.media && r.sel.includes('#indicators > span[data-indicator="poll-status"][data-style="active"]::before'));
@@ -482,4 +494,25 @@ test('Interfaces: an open device tooltip escapes the scrolling table card (last 
 	/* after the generic scroller, which it must beat */
 	const scroller = themeRules.findIndex((x) => !x.media && x.sel.includes('.cbi-tblsection') && /overflow-x:\s*auto/.test(x.body));
 	assert.ok(scroller >= 0 && themeRules.indexOf(r) > scroller);
+});
+
+/* Appearance: every option of a group one column of the same width, the
+   widest label's, and each label as wide as it is bold, picked, so a pick
+   moves no column (a label still never shrinks below its own width) */
+test('Appearance: equal columns, bold width kept for every label', () => {
+	const track = themeRules.find(r => r.sel.includes('.vt-appear-track'));
+	assert.ok(track, 'track rule');
+	assert.match(track.body, /display:\s*grid/);
+	assert.match(track.body, /grid-auto-flow:\s*column/);
+	assert.match(track.body, /grid-auto-columns:\s*1fr\b/);
+	const opt = themeRules.find(r => r.sel.includes('.vt-appear-opt'));
+	assert.doesNotMatch(opt.body, /min-width:\s*0/, 'a column keeps its label\'s width');
+	const after = themeRules.find(r => r.sel.includes('.vt-appear-opt > span::after'));
+	assert.ok(after, 'the bold copy');
+	assert.match(after.body, /content:\s*attr\(data-text\)\s*\/\s*""/, 'no second reading for screen readers');
+	assert.match(after.body, /font-weight:\s*600/);
+	assert.match(after.body, /visibility:\s*hidden/);
+	const picked = themeRules.find(r => r.sel.includes('.vt-appear-opt:has(> input:checked)'));
+	assert.match(picked.body, /font-weight:\s*600/, 'the same weight as the copy');
+	assert.match(menuJs, /E\('span', \{ 'data-text': o\[1\] \}, \[ o\[1\] \]\)/);
 });

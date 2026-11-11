@@ -578,16 +578,23 @@ html[data-darkmode="true"] .vt-app {
 	--vt-oc: var(--vt-ok);
 	background: color-mix(in oklab, var(--vt-oc) 16%, transparent);
 }
-/* the ring pulses only while something needs attention */
+/* the ring always pulses, or it reads as stuck: slowly and softly while
+   all is fine, at the full rate when something needs attention */
 .vt-app .vt-orb::after {
 	content: ""; position: absolute; inset: 0; border-radius: 50%;
 	border: 2px solid var(--vt-oc); opacity: .35;
+	animation: vt-ring-soft 5s ease-out infinite;
+	will-change: transform, opacity;
 }
 .vt-app .vt-orb-warn::after, .vt-app .vt-orb-err::after { animation: vt-ring 2.6s ease-out infinite; }
+/* paused, or another window has the focus (overview.js setMotion): the
+   ring stands still */
+.vt-app.vt-still .vt-orb::after { animation: none; }
 .vt-app .vt-orb-core { width: 14px; height: 14px; border-radius: 50%; background: var(--vt-oc); box-shadow: 0 0 0 4px color-mix(in oklab, var(--vt-oc) 22%, transparent); }
 .vt-app .vt-orb-warn { --vt-oc: var(--vt-warn); }
 .vt-app .vt-orb-err { --vt-oc: var(--vt-err); }
 @keyframes vt-ring { 0% { transform: scale(.7); opacity: .5; } 100% { transform: scale(1.35); opacity: 0; } }
+@keyframes vt-ring-soft { 0% { transform: scale(.85); opacity: .35; } 100% { transform: scale(1.3); opacity: 0; } }
 
 .vt-app .vt-head-text { min-width: 0; flex: 1; }
 .vt-app .vt-headline {
@@ -604,19 +611,28 @@ html[data-darkmode="true"] .vt-app {
 }
 .vt-app .vt-live-beat { position: relative; width: 8px; height: 8px; border-radius: 50%; background: var(--vt-beat-c, var(--vt-ok)); }
 /* the beat is a ring that scales and fades (compositor only; an animated
-   box-shadow repainted every frame), only while reconnecting: a live page
-   keeps a still dot. It sits behind the dot (z-index -1 in the pill's
+   box-shadow repainted every frame): slowly while live, at the full rate
+   while reconnecting, not at all while paused. It sits behind the dot (z-index -1 in the pill's
    stacking context) so the dot keeps its colour, and it is transparent
    unless the animation runs: nothing shows without motion. */
 .vt-app .vt-live-beat::after {
 	content: ""; position: absolute; inset: 0; z-index: -1; border-radius: 50%;
 	background: color-mix(in oklab, var(--vt-beat-c, var(--vt-ok)) 45%, transparent);
 	opacity: 0;
+	will-change: transform, opacity;
 }
 .vt-app .vt-live-paused .vt-live-beat { --vt-beat-c: var(--vt-text-3); }
 .vt-app .vt-live-err .vt-live-beat { --vt-beat-c: var(--vt-warn); }
+.vt-app .vt-live-ok .vt-live-beat::after { animation: vt-beat-soft 5s ease-out infinite; }
 .vt-app .vt-live-err .vt-live-beat::after { animation: vt-beat 2s ease-out infinite; }
+.vt-app.vt-still .vt-live-beat::after { animation: none; }
+/* the client drawer's "Don't warn about its signal" (#110) */
+.vt-app .vt-quiet { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 var(--vt-sp-3); font-size: var(--vt-fs-sm); color: var(--vt-text-2); }
+.vt-app .vt-quiet input { margin: 0; }
+.vt-app .vt-quiet-err { color: var(--vt-err); }
+.vt-app .vt-quiet-err:empty { display: none; }
 @keyframes vt-beat { 0% { transform: scale(1); opacity: 1; } 70%, 100% { transform: scale(2.75); opacity: 0; } }
+@keyframes vt-beat-soft { 0% { transform: scale(1); opacity: .6; } 70%, 100% { transform: scale(2.2); opacity: 0; } }
 
 .vt-app .vt-health {
 	display: grid; gap: 10px; margin-bottom: var(--vt-sp-4);
@@ -745,7 +761,10 @@ html[data-darkmode="true"] .vt-app {
 .vt-app .vt-fwire { opacity: 0; transition: opacity .4s; }
 .vt-app .vt-fwire-on { opacity: .95; }
 /* a 1.5 px dash with round caps of the 2.4 px stroke, centred on its point */
-.vt-app .vt-fdot { position: absolute; left: -1.95px; top: -1.2px; width: 3.9px; height: 2.4px; border-radius: 1.2px; background: var(--vt-accent-line); }
+/* will-change: the dots and the pulses keep their compositor layers while
+   their animations stand paused between the clock's ticks (overview.js
+   stepMotion), so each tick is a transform update, not a repaint */
+.vt-app .vt-fdot { position: absolute; left: -1.95px; top: -1.2px; width: 3.9px; height: 2.4px; border-radius: 1.2px; background: var(--vt-accent-line); will-change: transform; }
 .vt-app .vt-fwire-3 .vt-fdot { left: -2.25px; top: -1.5px; width: 4.5px; height: 3px; border-radius: 1.5px; }
 
 .vt-app .vt-node {
@@ -1045,6 +1064,8 @@ html[data-darkmode="true"] .vt-app {
 .vt-app .vt-status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--vt-ok); }
 .vt-app .vt-status-warn::before { background: var(--vt-warn); }
 .vt-app .vt-status-err::before { background: var(--vt-err); }
+/* a radio switched off on purpose: grey, not a warning */
+.vt-app .vt-status-off::before { background: var(--vt-text-3); }
 .vt-app .vt-icon-action {
 	display: inline-flex; align-items: center; justify-content: center; flex: none;
 	width: var(--vt-ctl); height: var(--vt-ctl); padding: 0; margin: 0; border: 0; border-radius: var(--vt-r-ctl);
@@ -1565,3 +1586,7 @@ html[data-darkmode="true"] .vt-app {
 	.vt-app .vt-flow-3.vt-flow-on { stroke-width: 3; }
 	.vt-app .vt-flows { display: none; }
 }
+/* Low-power router (overview.js applyPower): the same still picture */
+.vt-app.vt-low .vt-flow-on { opacity: .8; }
+.vt-app.vt-low .vt-flow-3.vt-flow-on { stroke-width: 3; }
+.vt-app.vt-low .vt-flows { display: none; }

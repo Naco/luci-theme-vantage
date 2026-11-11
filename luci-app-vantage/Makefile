@@ -10,15 +10,17 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-vantage
-PKG_VERSION:=1.0.16
+PKG_VERSION:=1.0.19
 PKG_RELEASE:=1
 PKG_LICENSE:=GPL-3.0-or-later
 
 LUCI_TITLE:=Vantage dashboard
 LUCI_DESCRIPTION:=Live network dashboard (landing page under admin/dashboard): device, \
 	uplink, radios, SSIDs and stations with health and experience scores. \
-	Read-only except for station names, which are kept in /etc/config/vantage.
-# rpcd-mod-iwinfo provides the station lists (iwinfo info/assoclist).
+	Read-only except for station names and stations set not to warn about \
+	their signal, which are kept in /etc/config/vantage.
+# rpcd-mod-iwinfo provides the station lists and the radios' state
+# (iwinfo info/assoclist/survey).
 # rpcd-mod-ucode runs the app's plugin (/usr/share/rpcd/ucode/luci.vantage:
 # key-free wireless status, thermal zones, validated alias writes), which
 # imports the uci, ubus and fs ucode modules; luci-base pulls all four in

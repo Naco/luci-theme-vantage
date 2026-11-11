@@ -6,6 +6,125 @@ Each release ships both packages, `luci-theme-vantage` and
 <https://github.com/anothaDev/luci-theme-vantage/releases> and in the
 [signed repositories](https://anothadev.github.io/luci-theme-vantage/).
 
+## 1.0.19 - 2026-11-11
+
+- **Dashboard: less router work again** (#101,
+  [@Groupguanfang](https://github.com/Groupguanfang)). Radio details
+  (16-22 ms a radio on an access point) are asked every 30 seconds, or
+  at once when a radio's channel or state changes; the noise floor still
+  comes every poll, from the radio's channel survey (1.5-2 ms); device
+  names from the DHCP leases every 30 seconds, and right after a device
+  appears. On a 4-core access point a minute of polling went from about
+  850 ms of CPU to 490 ms. The dashboard's read permission
+  (`luci-app-vantage`) now also grants `iwinfo survey` (read-only).
+- **Dashboard: wired devices on routers with a switch chip** (#101). The
+  full read of the bridges' device table also has the switch driver read
+  its chip's own table (29 ms on a MediaTek MT7981); it now runs only
+  when a device joins, leaves or changes port, or every 30 seconds, and
+  most refreshes read the kernel's own copy (0.1 ms).
+- **Dashboard: the CPU card no longer says "Measuring"** (#101). Until
+  its first reading, about a second after the page opens, it shows this
+  browser's last reading of the router (under ten minutes old) or 0%.
+- **Dashboard: Wi-Fi clients on a router keep their IPv4 address**
+  (#110, [@MohdMusab](https://github.com/MohdMusab)). They were filtered
+  by the internet line's subnet, so they showed only an IPv6 address and
+  reverse DNS and mDNS could not name them.
+- **Lighter motion.** The pulses (the status circle's ring, the Live
+  beat, the top bar's refresh dot on every refreshing page) and the
+  network path's backdrop move 15-20 times a second instead of 60, and
+  look the same: the browser draws far fewer frames for them.
+- **Appearance: options of equal width**; "Grid packets" is now "Grid".
+
+## 1.0.18 - 2026-11-10
+
+- **Dashboard: much less work for the router** (#101,
+  [@Groupguanfang](https://github.com/Groupguanfang)). The dashboard's
+  server side rebuilt its text patterns on every check, which cost
+  milliseconds each on a router, and radio details were asked once a
+  network instead of once a radio: on a 4-core access point a whole
+  5-second poll went from about 180 ms of CPU to 70 ms (the dashboard's
+  own calls from about 120 ms to 15 ms), with the same answers. A reload
+  no longer polls twice or reads the page's own build as the CPU load, so
+  the CPU card stops jumping to 100% on every refresh.
+- **Dashboard: Low-power router** (#101). Appearance → Low-power router
+  (with the dashboard; off by default) keeps the live numbers but asks
+  for the slow parts (Wi-Fi state, radio details, temperatures, wired
+  hosts) every 30 seconds, drops the network path's backdrop and moving
+  dots and the login page's particles, and after 5 minutes without input
+  refreshes every 30 seconds until you touch the page again.
+- **Dashboard: a far-away device needn't warn** (#110,
+  [@MohdMusab](https://github.com/MohdMusab)). A device's details have
+  "Don't warn about its signal": its weak signal then stays out of the
+  Signal warning, for every browser. It is kept beside the names in
+  `/etc/config/vantage`, through the dashboard's names permission
+  (`luci-app-vantage-names` now also grants `luci.vantage set_quiet`).
+- **Dashboard: a radio you switched off is no warning** (#110). The Wi-Fi
+  card still says it is off.
+- **Theme: a one-click light/dark switch and a gear for Appearance**
+  (#109, [@Gimenz](https://github.com/Gimenz)). The sun/moon cycles
+  automatic, the look your system doesn't use, the one it does; the gear
+  next to it opens Appearance. The hostname · model chip opens Status →
+  Overview.
+- **Check for updates works.** The package build's minifier changed one
+  pattern, so the check could never read the list on a router (#109).
+- **Theme: wide screens** (#113,
+  [@smallprogram](https://github.com/smallprogram)). Past about 1920
+  pixels the content column grows with the window, up to 2400 pixels,
+  instead of leaving most of a 2K or 4K screen empty.
+- **Theme: PassWall's node list is opaque again** (#112,
+  [@trosh2023](https://github.com/trosh2023)). Since Chrome 135 it copied
+  a see-through colour from the selected option.
+- **Theme: logins with a second factor** (#114,
+  [@yipush](https://github.com/yipush)). With LuCI's authentication
+  plugins (luci-plugin-2fa, after 25.12) the login page shows their
+  fields, guidance and errors, and their own content.
+- **Motion stops while you're in another window**: the dashboard's
+  moving parts and the top bar's refresh dot stand still until the window
+  has the focus again; the numbers keep updating.
+
+## 1.0.17 - 2026-11-08
+
+- **Install commands stop when a check fails.** Each pasted block now
+  chains its steps, so a key or file that doesn't match its published
+  SHA-256 stops it before anything is trusted or installed. On 24.10 the
+  key is checked by its file's SHA-256: the `usign -F` fingerprint is
+  stored in the key itself and proved nothing. Files are fetched into a
+  private `/tmp/vantage` folder, and Uninstall now also removes the
+  signing key and the feed line, on both package managers.
+- **Theme: the pulse is back** (#100,
+  [@smallprogram](https://github.com/smallprogram)). The dashboard's
+  status circle pulses slowly while all is fine and faster when something
+  needs attention, and the top bar's refresh dot does the same: soft green
+  while refreshing, amber and faster on a warning or while reconnecting,
+  red on an error. The login page has no dot.
+- **Theme: the login page shows the router's hostname** instead of
+  "Authorization Required" (#100).
+- **Theme: a name next to the logo** (#100). Appearance → Next to the
+  logo shows the hostname or the model beside the logo; the default stays
+  the logo only.
+- **Installed version and a Check for updates button** (#102,
+  [@bakaranadnan-a11y](https://github.com/bakaranadnan-a11y)). The
+  dashboard's System tile and Appearance show the version. Check for
+  updates reads the project's package list from your browser, only when
+  you click it, without cookies or a referrer; nothing installs by itself.
+- **Theme: the memory meter on Kwrt** (#103,
+  [@keriesli](https://github.com/keriesli)). Status → Overview showed
+  100% available and 0 B in use with luci-mod-status builds that have no
+  "Total Available" row; those are read too now, swap included.
+- **Dashboard: on routers without Wi-Fi the network path shows the Wired
+  branch** (#98, [@VIKINGYFY](https://github.com/VIKINGYFY)), with its
+  hosts, as on Wi-Fi devices.
+- **Theme: text fields in tables keep their width** (#106,
+  [@elonnzhang](https://github.com/elonnzhang)). A column with a short
+  header, such as Name and Path in Network Shares, shrank to a sliver
+  and hid its value.
+- **Dashboard: pausing stops the motion.** Paused from the top bar's
+  refresh pill, the status ring, the flow dots and the backdrop stand
+  still; the CPU reading starts over on resume.
+- **Dashboard: history stays with one login.** The charts' history kept
+  in the browser tab is dropped at logout and ignored by another login in
+  the same tab.
+
 ## 1.0.16 - 2026-11-06
 
 - **Theme: Appearance is saved on the router** (#89,

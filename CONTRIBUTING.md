@@ -166,7 +166,7 @@ your catalogues; there is nothing else to set up.
   entry and an allowlist entry in `security-tests/test_acl_policy.js`, with
   the reason in the pull request. The app stays read-only apart from its
   own `/etc/config/vantage`, which it writes only through its rpcd plugin
-  (`luci.vantage set_alias`, validated on the device); no group of the app
+  (`luci.vantage set_alias` and `set_quiet`, validated on the device); no group of the app
   grants uci writes (the theme's own group writes `/etc/config/vantage_theme`
   and nothing else), and nothing reads Wi-Fi keys. Changes to the plugin's name
   rules go into `names.js` and `dev/replay/vantage-plugin.js` as well;
@@ -214,7 +214,9 @@ SDK.
 ## Releases
 
 1. Add the release to `CHANGELOG.md` (user-visible changes, newest
-   first), bump `PKG_VERSION` in both Makefiles and commit.
+   first), bump `PKG_VERSION` in both Makefiles and the `VERSION` lines of
+   `overview.js` and `menu-vantage.js` (`tests/version.test.js` checks
+   them), and commit.
 2. Build that commit locally for both releases:
    `dev/build/sdk-build.sh 25.12.4` and `dev/build/sdk-build.sh 24.10.8`.
 3. Commit both builds' hashes, `dist/25.12.4/SHA256SUMS` and

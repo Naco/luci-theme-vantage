@@ -12,6 +12,8 @@ const { load, RES } = require('./luci-stub');
 const REPLIES = {};
 /* the view's `ui`: tests set ui.menu */
 const UI = {};
+/* LuCI's poll: tests pause it */
+const POLL = { on: true, active() { return this.on; } };
 
 function loadView() {
 	const src = fs.readFileSync(path.join(RES, 'view/vantage/overview.js'), 'utf8');
@@ -19,7 +21,7 @@ function loadView() {
 		view: { extend: p => p },
 		/* replies come from REPLIES['object method'](...args) when set */
 		rpc: { declare: o => function(...args) { const f = REPLIES[o.object + ' ' + o.method]; return f ? f(...args) : Promise.resolve(null); } },
-		poll: {}, ui: UI, dom: {}
+		poll: POLL, ui: UI, dom: {}
 	};
 	const params = [], values = [];
 	for (const m of src.matchAll(/^'require ([\w.-]+)(?: as (\w+))?';$/gm)) {
@@ -74,6 +76,8 @@ test('deep links: arbitrary text, unknown radios and bad escapes are dropped, no
 });
 
 test('stored history: keys from sessionStorage cannot replace a prototype', () => {
+	const savedL = global.L;
+	global.L = { env: {} };
 	const stored = JSON.stringify({ net: JSON.parse('{"__proto__":[[1,2,3]],"constructor":[[1,2,3]],"radio0":[[1,2,3]]}'), clients: {} });
 	const saved = global.window;
 	global.window = {
@@ -92,6 +96,7 @@ test('stored history: keys from sessionStorage cannot replace a prototype', () =
 			assert.equal(Object.getPrototypeOf(self.st[k]), null, k);
 	} finally {
 		global.window = saved;
+		global.L = savedL;
 	}
 });
 
@@ -297,6 +302,111 @@ test('wired reply: hosts kept, a crowded bridge flagged, anything else read as n
 	finally { global.L = savedL; delete REPLIES['luci.vantage wired']; }
 });
 
+/* iwinfo info costs the router 15-22 ms an interface: asked for a radio's
+   first interface, and for another only until hostapd gives its BSSID;
+   each reading stands for 30 s, unless the interface's state moves (its
+   channel in hostapd's status, its radio in luci.vantage wireless) */
+test('iwinfo info: once a radio, and for a network hostapd does not answer for; kept 30 s unless the state moves', async () => {
+	const asked = [], hapdOff = new Set(), chan = {};
+	let radioUp = true;
+	const ifc = (ifname, mode) => ({ ifname, section: ifname, config: { mode: mode || 'ap', ssid: 'S-' + ifname } });
+	REPLIES['luci.vantage wireless'] = () => Promise.resolve({
+		radio0: { up: true, config: { band: '2g' }, interfaces: [ ifc('wl0'), ifc('wl0-1'), ifc('wl0-sta', 'sta') ] },
+		radio1: { up: radioUp, config: { band: '5g' }, interfaces: [ ifc('wl1') ] }
+	});
+	REPLIES['iwinfo info'] = device => { asked.push(device); return Promise.resolve({ channel: 6, bssid: '00:00:5E:00:53:0' + device.length }); };
+	for (const ifn of [ 'wl0', 'wl0-1', 'wl0-sta', 'wl1' ])
+		REPLIES['hostapd.' + ifn + ' get_status'] = () => (ifn === 'wl0-sta' || hapdOff.has(ifn)) ? Promise.reject(new Error('not found')) : Promise.resolve({ bssid: '00:00:5e:00:53:a' + ifn.length, ssid: 'S-' + ifn, channel: chan[ifn] || 1 });
+	const self = Object.create(view);
+	const savedL = global.L, now = Date.now;
+	let t = 1e12;
+	Date.now = () => t;
+	global.L = { resolveDefault: (p, d) => Promise.resolve(p).then(v => v == null ? d : v, () => d) };
+	const poll = async ms => { t += ms; return self.fetch(); };
+	try {
+		let r = await poll(0);
+		assert.deepEqual(asked.splice(0).sort(), [ 'wl0', 'wl0-1', 'wl0-sta', 'wl1' ], 'the first poll asks every interface');
+		r = await poll(5e3);
+		assert.deepEqual(asked.splice(0), [], 'then nothing for 30 s');
+		assert.equal(r.iwinfo.wl0.channel, 6, 'the reading stands');
+		assert.equal(r.hapdStatus['wl0-1'].bssid, '00:00:5e:00:53:a5', 'its BSSID comes from hostapd');
+		assert.equal(r.iwinfo['wl0-1'], undefined, 'and not from its first poll\'s iwinfo, kept');
+		assert.equal(r.iwinfo['wl0-sta'].channel, 6, 'one hostapd does not serve keeps its reading');
+		await poll(25e3);
+		assert.deepEqual(asked.splice(0).sort(), [ 'wl0', 'wl0-sta', 'wl1' ], 'after 30 s: a radio\'s first, and the one hostapd does not serve');
+		/* hostapd reports wl1 on another channel: asked at the next poll */
+		chan.wl1 = 44;
+		await poll(5e3);
+		assert.deepEqual(asked.splice(0), [], 'the new status is this poll\'s');
+		await poll(5e3);
+		assert.deepEqual(asked.splice(0), [ 'wl1' ], 'the channel moved: wl1 again');
+		/* its radio goes down: asked at once */
+		radioUp = false;
+		await poll(5e3);
+		assert.deepEqual(asked.splice(0), [ 'wl1' ], 'the radio went down: wl1 again');
+		await poll(5e3);
+		assert.deepEqual(asked.splice(0), [], 'and kept again');
+		hapdOff.add('wl0-1');
+		await poll(5e3);
+		await poll(5e3);
+		/* 30 s have passed for wl0 and wl0-sta as well */
+		assert.deepEqual(asked.splice(0).sort(), [ 'wl0', 'wl0-1', 'wl0-sta' ], 'hostapd gone quiet: asked again');
+	}
+	finally {
+		global.L = savedL; Date.now = now;
+		for (const k of Object.keys(REPLIES)) if (/^(luci\.vantage wireless|iwinfo info|hostapd\.)/.test(k)) delete REPLIES[k];
+	}
+});
+
+/* Low-power router (#101): the slow parts once every 30 s, their last
+   replies in between; the rest every poll */
+test('Low-power router: Wi-Fi state, temperatures, wired hosts, iwinfo and client capabilities once every 30 s', async () => {
+	const count = {};
+	const reply = (key, v) => { REPLIES[key] = (...a) => { count[key] = (count[key] || 0) + 1; return Promise.resolve(typeof v === 'function' ? v(...a) : v); }; };
+	reply('luci.vantage wireless', { radio0: { up: true, config: { band: '2g' }, interfaces: [ { ifname: 'wl0', section: 'wl0', config: { mode: 'ap' } } ] } });
+	reply('luci.vantage thermal', [ { zone: 'thermal_zone0', type: 'cpu', temp: 50000 } ]);
+	reply('luci.vantage wired', { hosts: [ { mac: '00:00:5e:00:53:01', port: 'lan1', bridge: 'br-lan', seen: 1 } ] });
+	reply('iwinfo info', { channel: 6 });
+	reply('iwinfo survey', [ { mhz: 2437, noise: 146 } ]);
+	reply('hostapd.wl0 get_clients', { clients: {} });
+	reply('hostapd.wl0 get_status', { bssid: '00:00:5e:00:53:aa' });
+	reply('system info', {});
+	const self = Object.create(view);
+	const saved = { L: global.L, document: global.document, now: Date.now };
+	let t = 1e12, power = 'low';
+	Date.now = () => t;
+	global.document = { hidden: false, documentElement: { getAttribute: n => n === 'data-vt-power' ? power : null } };
+	global.L = { resolveDefault: (p, d) => Promise.resolve(p).then(v => v == null ? d : v, () => d) };
+	const slowKeys = [ 'luci.vantage wireless', 'luci.vantage thermal', 'luci.vantage wired', 'iwinfo survey', 'hostapd.wl0 get_clients' ];
+	const slowCount = () => slowKeys.map(k => count[k] || 0);
+	try {
+		const first = await self.fetch();
+		assert.deepEqual(slowCount(), [ 1, 1, 1, 1, 1 ]);
+		t += 10e3;
+		const kept = await self.fetch();
+		assert.deepEqual(slowCount(), [ 1, 1, 1, 1, 1 ], 'not again within 30 s');
+		assert.equal(count['system info'], 2, 'the rest every poll');
+		assert.equal(count['hostapd.wl0 get_status'], 2);
+		assert.deepEqual([ kept.wifi, kept.thermal, kept.fdb, kept.iwinfo, kept.hapd, kept.survey ], [ first.wifi, first.thermal, first.fdb, first.iwinfo, first.hapd, first.survey ], 'their last replies');
+		assert.equal(count['iwinfo info'], 1);
+		t += 20e3;
+		await self.fetch();
+		assert.deepEqual(slowCount(), [ 2, 2, 2, 2, 2 ], 'again after 30 s');
+		assert.equal(count['iwinfo info'], 2);
+		power = 'normal';
+		t += 1e3;
+		const off = await self.fetch();
+		assert.deepEqual(slowCount(), [ 3, 3, 3, 3, 3 ], 'off: every poll');
+		assert.equal(count['iwinfo info'], 2, 'iwinfo info on its own 30 s');
+		assert.deepEqual(off.survey.wl0, [ { mhz: 2437, noise: 146 } ], 'the survey every poll');
+	}
+	finally {
+		global.L = saved.L; Date.now = saved.now;
+		if (saved.document === undefined) delete global.document; else global.document = saved.document;
+		for (const k of Object.keys(REPLIES)) if (/^(luci\.vantage (wireless|thermal|wired)|iwinfo (info|survey)|hostapd\.|system info)/.test(k)) delete REPLIES[k];
+	}
+});
+
 test('switch ports: LuCI is asked on the side for a switch with hosts behind it, at most every 30 s from the call; a failure is not known', async () => {
 	const calls = [], STATE = [ { port: 1, link: true, speed: 1000, duplex: true } ];
 	const lan = n => ({ num: n, role: 'lan', index: n + 1 });
@@ -475,12 +585,33 @@ test('header: model and hostname once each, one of them when it holds the other'
 	assert.deepEqual(id({ model: 'Example AX3000', hostname: '--' }), [ 'Example AX3000', '--' ], 'nothing to compare: both');
 });
 
+test('health: the theme\'s refresh dot hears a warning or an error, nothing else', () => {
+	const saved = global.document;
+	const root = { attrs: {}, setAttribute(k, v) { this.attrs[k] = v; } };
+	global.document = { documentElement: root };
+	try {
+		for (const [ level, want ] of [ [ 'ok', '' ], [ 'warn', 'warn' ], [ 'err', 'err' ], [ 'unknown', '' ], [ 'info', '' ] ]) {
+			const self = Object.create(view);
+			self.st = { summary: { level, headline: 'x' } };
+			self.m = { clients: [], device: {}, wired: false };
+			self.el = { orb: {}, headline: { textContent: '' }, subline: { textContent: '' } };
+			self.identity = () => [];
+			self.paintHead();
+			assert.equal(self.el.orb.className, 'vt-orb vt-orb-' + level);
+			assert.equal(root.attrs['data-vt-alert'], want, level);
+		}
+	} finally {
+		if (saved === undefined) delete global.document; else global.document = saved;
+	}
+});
+
 test('live pill: under the Vantage theme only when not live; under another theme always', () => {
 	const saved = { L: global.L, document: global.document };
 	const pill = () => ({ className: '', hidden: false, attrs: {}, setAttribute(k, v) { this.attrs[k] = v; } });
+	const root = { attrs: {}, setAttribute(k, v) { this.attrs[k] = v; } };
 	const run = (media, st) => {
 		global.L = { env: { media } };
-		global.document = { hidden: false };
+		global.document = { hidden: false, documentElement: root };
 		const self = Object.create(view);
 		self.st = Object.assign({ paused: false, lastErr: null, lastOk: Date.now() }, st);
 		self.el = { live: pill(), liveText: { textContent: '' } };
@@ -490,10 +621,73 @@ test('live pill: under the Vantage theme only when not live; under another theme
 	try {
 		assert.deepEqual(run('/luci-static/vantage', {}), [ true, 'vt-livepill vt-live-ok' ], 'the theme\'s poll indicator says it');
 		assert.deepEqual(run('/luci-static/vantage', { lastErr: new Error('x') }), [ false, 'vt-livepill vt-live-err' ]);
+		assert.equal(root.attrs['data-vt-live'], 'err', 'the theme\'s refresh dot hears it');
 		assert.deepEqual(run('/luci-static/vantage/', { paused: true }), [ false, 'vt-livepill vt-live-paused' ]);
 		assert.deepEqual(run('/luci-static/bootstrap', {}), [ false, 'vt-livepill vt-live-ok' ]);
 	} finally {
 		global.L = saved.L;
+		if (saved.document === undefined) delete global.document; else global.document = saved.document;
+	}
+});
+
+test('paused from LuCI\'s indicator: the pill says so (once, under the Vantage theme) and nothing moves', () => {
+	const saved = { L: global.L, document: global.document, window: global.window };
+	const root = { attrs: {}, setAttribute(k, v) { this.attrs[k] = v; } };
+	/* the flow dots are compositor animations, paused and played with the
+	   motion; the pulses (the ring, the beat) stand paused and the clock
+	   (tickMotion) moves them while it runs, and stops when nothing may move */
+	const anim = () => ({ state: 'running', play() { this.state = 'running'; }, pause() { this.state = 'paused'; } });
+	const pulse = () => ({ currentTime: 0, playState: 'paused' });
+	const frames = [], timers = [];
+	global.window = { requestAnimationFrame: fn => frames.push(fn), setTimeout: fn => timers.push(fn), dispatchEvent() {} };
+	const make = media => {
+		global.L = { env: { media } };
+		global.document = { hidden: false, documentElement: root };
+		const self = Object.create(view);
+		const cls = new Set();
+		self.st = { paused: false, lastErr: null, lastOk: Date.now() };
+		self.el = { live: { className: '', hidden: false, setAttribute() {} }, liveText: { textContent: '' },
+			root: { classList: { toggle: (c, on) => on ? cls.add(c) : cls.delete(c) } } };
+		self.wireMap = { a: { anims: [ anim(), anim() ], steps: [], speed: 1 } };
+		self.clock = { anims: [ { a: pulse(), dur: 5000, at: 0 } ], raf: 0, timer: 0, last: 0 };
+		self.backdrop = { paused: false, pause(on) { this.paused = on; }, wants() { return false; }, period() { return 50; }, frame() { return false; } };
+		self.cls = cls;
+		return self;
+	};
+	try {
+		POLL.on = false;
+		let self = make('/luci-static/vantage');
+		self.paintLive();
+		assert.equal(self.el.live.className, 'vt-livepill vt-live-paused');
+		assert.equal(self.el.live.hidden, true, 'the theme\'s indicator already says Paused');
+		assert.equal(self.el.liveText.textContent, 'Paused');
+		assert.equal(root.attrs['data-vt-live'], 'paused');
+		assert.ok(self.cls.has('vt-still'), 'the status circle stands still');
+		assert.deepEqual(self.wireMap.a.anims.map(a => a.state), [ 'paused', 'paused' ], 'the flow dots stop where they are');
+		assert.equal(frames.length, 0, 'the clock does not start');
+		self.tickMotion(100);
+		assert.deepEqual([ frames.length, timers.length, self.clock.anims[0].a.currentTime ], [ 0, 0, 0 ], 'a tick moves nothing and asks for no frame');
+		assert.equal(self.backdrop.paused, true, 'the backdrop keeps its last frame');
+		POLL.on = true;
+		self.paintLive();
+		assert.equal(self.el.live.className, 'vt-livepill vt-live-ok');
+		assert.ok(!self.cls.has('vt-still'));
+		assert.deepEqual(self.wireMap.a.anims.map(a => a.state), [ 'running', 'running' ], 'and go on from there');
+		assert.equal(frames.length, 1, 'the clock starts');
+		frames.pop()(100);
+		frames.pop() && assert.fail('a tick asks for its next frame through a timer, not at once');
+		assert.equal(timers.length, 1, 'the next frame waits for the clock');
+		self.tickMotion(150);
+		assert.equal(self.clock.anims[0].a.currentTime, 50, 'the pulse goes on from there, 50 ms a tick');
+		assert.equal(self.backdrop.paused, false);
+		POLL.on = false;
+		self = make('/luci-static/bootstrap');
+		self.paintLive();
+		assert.deepEqual([ self.el.live.hidden, self.el.liveText.textContent ], [ false, 'Paused' ], 'another theme: the pill says it');
+	} finally {
+		POLL.on = true;
+		global.L = saved.L;
+		if (saved.window === undefined) delete global.window; else global.window = saved.window;
 		if (saved.document === undefined) delete global.document; else global.document = saved.document;
 	}
 });
@@ -711,9 +905,125 @@ test('other lines: the uplink drawer shows the line asked for, its rates and rou
 	});
 });
 
+test('stored history: it belongs to one login', () => {
+	const savedWindow = global.window, savedL = global.L, box = {};
+	const hist = sid => JSON.stringify({ sid, cpu: [ [ 1, 2 ], [ 3, 4 ] ], clients: { '00:00:5E:00:53:01': [ [ 1, 2 ] ] } });
+	global.window = {
+		sessionStorage: { getItem: () => box.v || null, setItem(k, v) { box.v = v; } },
+		localStorage: { getItem: () => null, setItem() {} }
+	};
+	global.L = { env: { sessionid: '0123456789abcdef0123456789abcdef' } };
+	const load = () => { const self = Object.create(view); self.initState({ board: {}, canWrite: false, canRdns: false, mdns: null }); return self; };
+	const now = Date.now();
+	try {
+		box.v = hist('89abcdef').replace('[[1,2],[3,4]]', JSON.stringify([ [ now - 2000, 2 ], [ now - 1000, 4 ] ]));
+		assert.equal(load().st.hist.cpu.length, 2, 'the same login keeps its history');
+		box.v = hist('ffffffff');
+		const other = load();
+		assert.equal(other.st.hist.cpu.length, 0, 'another login starts empty');
+		assert.deepEqual(Object.keys(other.st.clientHist), []);
+	} finally {
+		global.window = savedWindow;
+		global.L = savedL;
+	}
+});
+
+/* #101: the CPU tile shows the browser's last reading of this router
+   (local storage, the router's origin's: every tab), if under ten
+   minutes old, while the first measurement runs; not a dash */
+test('CPU: the last reading stands in for ten minutes while the first is measured', () => {
+	const savedWindow = global.window, savedL = global.L, box = {};
+	global.window = {
+		sessionStorage: { getItem: () => null, setItem() {} },
+		localStorage: { getItem: k => k === 'vantage.cpu.v1' ? box.v || null : null, setItem(k, v) { if (k === 'vantage.cpu.v1') box.v = v; } }
+	};
+	global.L = { env: { sessionid: '0123456789abcdef0123456789abcdef' } };
+	const load = () => { const self = Object.create(view); self.initState({ board: {}, canWrite: false, canRdns: false, mdns: null }); return self; };
+	const put = v => { box.v = JSON.stringify(v); };
+	const now = Date.now();
+	try {
+		put({ pct: 12.5, cores: [ 10, null ], t: now - 9 * 60e3 });
+		const held = load().st;
+		assert.deepEqual(held.cpu, { pct: 12.5, cores: [ 10, null ], t: now - 9 * 60e3 });
+		assert.equal(held.cores, 2);
+		put({ pct: 12.5, cores: [ 10, 15 ], t: now - 11 * 60e3 });
+		assert.equal(load().st.cpu, null, 'older than ten minutes');
+		for (const bad of [ { pct: 120, cores: [], t: now }, { pct: 5, cores: [ 'x' ], t: now }, { pct: 5, cores: {}, t: now }, { pct: 5, cores: [], t: now + 60000 }, { pct: 5, cores: [] }, 'junk' ]) {
+			put(bad);
+			assert.equal(load().st.cpu, null, JSON.stringify(bad));
+		}
+		/* a reading is kept for the next page, at most every 10 s */
+		box.v = null;
+		const self = load();
+		const stat = (busy, idle) => 'cpu  ' + busy + ' 0 0 ' + idle + ' 0 0 0 0 0 0\ncpu0 ' + busy + ' 0 0 ' + idle + ' 0 0 0 0 0 0\n';
+		const raw = (t, st) => ({ at: t, info: { localtime: t / 1000 }, stat: st, ifaces: [], wifi: null, hints: {}, thermal: [], fdb: [], assoc: {}, hapd: {}, hapdStatus: {}, iwinfo: {}, devs: {} });
+		self.ingest(raw(1.8e12, stat(100, 900)));
+		assert.equal(box.v || null, null, 'nothing measured yet');
+		self.ingest(raw(1.8e12 + 5000, stat(150, 1050)));
+		const kept = JSON.parse(box.v);
+		assert.deepEqual([ Math.round(kept.pct), kept.cores.map(Math.round) ], [ 25, [ 25 ] ]);
+		assert.ok(Math.abs(kept.t - Date.now()) < 5000);
+		self.ingest(raw(1.8e12 + 10000, stat(300, 1100)));
+		assert.equal(Math.round(JSON.parse(box.v).pct), 25, 'not again within 10 s');
+		assert.equal(Math.round(self.st.cpu.pct), 75, 'though shown');
+		assert.deepEqual(load().st.cpu.pct, kept.pct, 'and shown on the next page');
+	} finally {
+		global.window = savedWindow;
+		global.L = savedL;
+	}
+});
+
+/* the first reading takes two samples a second apart: the second is
+   asked 1.1 s after the first, not at the 2 s lane's next tick */
+test('CPU: 0 % until the first reading, its second sample a second after the first', async () => {
+	const savedWindow = global.window, savedL = global.L, savedDoc = global.document, timers = [];
+	/* ticks a call: under a second's worth (100) gives no reading */
+	let ticks = 100;
+	const steps = [ 0, 60, 150, 150 ];
+	global.window = { sessionStorage: { getItem: () => null, setItem() {} }, localStorage: { getItem: () => null, setItem() {} },
+		setTimeout: (f, ms) => { timers.push(ms); return timers.length; } };
+	global.document = { hidden: false, documentElement: { getAttribute: () => null } };
+	global.L = { env: {}, resolveDefault: (p, d) => Promise.resolve(p).then(v => v == null ? d : v, () => d) };
+	REPLIES['file read'] = () => { ticks += steps.shift() || 150; return Promise.resolve('cpu  ' + ticks + ' 0 0 0 0 0 0 0 0 0\ncpu0 ' + ticks + ' 0 0 0 0 0 0 0 0 0\n'); };
+	try {
+		const self = Object.create(view);
+		self.initState({ board: {}, canWrite: false, canRdns: false, mdns: null });
+		self.el = { root: {} };
+		self.m = { uplink: null };
+		self.fastLive = () => true;
+		self.idle = () => false;
+		self.paintFast = () => {};
+		assert.equal(self.cpuShown(), null, 'no sample from the router: a dash');
+		await self.refreshFast();
+		assert.deepEqual(timers, [ 1100 ], 'the first sample: the second asked in 1.1 s');
+		assert.deepEqual(self.cpuShown(), { pct: 0, cores: [ 0 ] }, 'until then 0 %, not a dash');
+		await self.refreshFast();
+		assert.deepEqual(timers, [ 1100 ], 'one timer at a time');
+		self.cpuSoon = 0;
+		await self.refreshFast();
+		assert.ok(self.st.cpu && self.st.cpuMeasured, 'a reading');
+		assert.equal(self.cpuShown(), self.st.cpu);
+		/* the lane's tick and the early sample share a call in flight */
+		let calls = 0;
+		const saved = REPLIES['file read'];
+		REPLIES['file read'] = (...a) => { calls++; return saved(...a); };
+		await Promise.all([ self.refreshFast(), self.refreshFast() ]);
+		assert.equal(calls, 1, 'one call for both');
+		await self.refreshFast();
+		assert.equal(calls, 2, 'and the next one after it');
+		await self.refreshFast();
+		assert.deepEqual(timers, [ 1100 ], 'and none once measured');
+	} finally {
+		global.window = savedWindow; global.L = savedL;
+		if (savedDoc === undefined) delete global.document; else global.document = savedDoc;
+		delete REPLIES['file read'];
+	}
+});
+
 test('other lines: a failover starts the new main line on its own history; a restored "uplink" of nobody is dropped', () => {
-	const saved = global.window;
+	const saved = global.window, savedL = global.L;
 	const box = {};
+	global.L = { env: {} };
 	global.window = {
 		sessionStorage: { getItem: () => box.v || null, setItem(k, v) { box.v = v; } },
 		localStorage: { getItem: () => null, setItem() {} }
@@ -745,6 +1055,7 @@ test('other lines: a failover starts the new main line on its own history; a res
 		assert.ok(!('uplink' in JSON.parse(box.v).net));
 	} finally {
 		global.window = saved;
+		global.L = savedL;
 	}
 });
 
@@ -757,4 +1068,338 @@ test('other lines: hosts on a backup line\'s port are the way to its gateway, no
 	/* the backup's port unknown (the VLAN's own counters): nothing left out */
 	wanb.port = null;
 	assert.deepEqual(self.wiredPorts(), [ 'lan1', 'lan4' ]);
+});
+
+test('nothing moves while another window has the focus or Low-power router is on; the numbers go on', () => {
+	const saved = { L: global.L, document: global.document };
+	let power = 'normal';
+	const root = { attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }, getAttribute(k) { return k === 'data-vt-power' ? power : null; } };
+	global.L = { env: { media: '/luci-static/vantage' } };
+	global.document = { hidden: false, documentElement: root };
+	const cls = new Set();
+	const self = Object.create(view);
+	self.st = { paused: false, lastErr: null, lastOk: Date.now() };
+	self.el = { live: { className: '', hidden: false, setAttribute() {} }, liveText: { textContent: '' },
+		root: { classList: { toggle: (c, on) => on ? cls.add(c) : cls.delete(c) } } };
+	self.backdrop = { paused: false, pause(on) { this.paused = on; } };
+	try {
+		POLL.on = true;
+		self.paintLive();
+		assert.ok(!cls.has('vt-still'));
+		self.focused = false;
+		self.paintLive();
+		assert.ok(cls.has('vt-still'), 'another window has the focus');
+		assert.equal(self.el.live.className, 'vt-livepill vt-live-ok', 'still live');
+		self.focused = true;
+		self.paintLive();
+		assert.ok(!cls.has('vt-still'));
+		power = 'low';
+		self.paintLive();
+		assert.ok(cls.has('vt-still'), 'Low-power router');
+		assert.equal(self.backdrop.paused, true);
+	} finally {
+		global.L = saved.L;
+		if (saved.document === undefined) delete global.document; else global.document = saved.document;
+	}
+});
+
+
+test('Low-power router: the same still picture as reduced motion, no backdrop, and back with the pick kept', () => {
+	const saved = { L: global.L, document: global.document };
+	let power = 'low';
+	const root = { attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }, getAttribute(k) { return k === 'data-vt-power' ? power : null; } };
+	global.L = { env: { media: '/luci-static/vantage' } };
+	global.document = { hidden: false, documentElement: root };
+	const cls = new Set(), styles = [];
+	const self = Object.create(view);
+	self.st = { paused: false, lastErr: null, lastOk: Date.now() };
+	self.el = { live: { className: '', hidden: false, setAttribute() {} }, liveText: { textContent: '' },
+		root: { classList: { toggle: (c, on) => on ? cls.add(c) : cls.delete(c) } } };
+	self.backdrop = { paused: false, pause(on) { this.paused = on; }, style(v) { styles.push(v); } };
+	self.backdropStyle = 'stars';
+	let wired = 0;
+	self.paintWireState = () => { wired++; };
+	try {
+		POLL.on = true;
+		self.applyPower();
+		assert.ok(cls.has('vt-low') && cls.has('vt-still'));
+		assert.deepEqual(styles.splice(0), [ 'none' ], 'no backdrop');
+		assert.equal(wired, 1, 'the wires redrawn without flow dots');
+		self.showBackdrop('grid');
+		assert.deepEqual(styles.splice(0), [ 'none' ], 'a new pick waits');
+		power = 'normal';
+		self.applyPower();
+		assert.ok(!cls.has('vt-low') && !cls.has('vt-still'));
+		assert.deepEqual(styles, [ 'grid' ], 'the pick back');
+	} finally {
+		global.L = saved.L;
+		if (saved.document === undefined) delete global.document; else global.document = saved.document;
+	}
+});
+
+test('polls: the fast lane is registered before the full poll (#101: no second full poll on load)', () => {
+	const src = fs.readFileSync(path.join(RES, 'view/vantage/overview.js'), 'utf8');
+	const fast = src.indexOf('poll.add(L.bind(this.refreshFast, this), FAST_S);'), full = src.indexOf('poll.add(L.bind(this.refresh, this), POLL_S);');
+	assert.ok(fast > 0 && full > fast);
+	assert.ok(src.indexOf('this.inputAt = this.fullAt = Date.now();') > 0 && src.indexOf('this.inputAt = this.fullAt = Date.now();') < fast, 'load() counts as the last full poll');
+});
+
+test('Low-power router: after 5 minutes without input, the full poll every 30 s and no fast lane; the next input is live at once', async () => {
+	const saved = { L: global.L, document: global.document, now: Date.now };
+	let power = 'low', t = 1e12, reads = 0;
+	Date.now = () => t;
+	global.document = { hidden: false, documentElement: { getAttribute: k => k === 'data-vt-power' ? power : null, setAttribute() {} } };
+	global.L = { resolveDefault: (p, d) => Promise.resolve(p).then(v => v == null ? d : v, () => d), env: {} };
+	REPLIES['file read'] = () => { reads++; return Promise.resolve({ data: '' }); };
+	const self = Object.create(view);
+	let fetches = 0;
+	self.fetch = () => { fetches++; return Promise.resolve({}); };
+	self.ingest = () => {}; self.paint = () => {}; self.paintLive = () => {};
+	self.st = { lastOk: t, paused: false };
+	self.el = {};
+	self.m = { uplink: null };
+	self.inputAt = t;
+	try {
+		t += 60e3;
+		await self.refresh(); await self.refreshFast();
+		assert.deepEqual([ fetches, reads ], [ 1, 1 ], 'watched: as always');
+		t += 5 * 60e3;
+		assert.equal(self.idle(), true);
+		await self.refreshFast();
+		assert.equal(reads, 1, 'idle: no fast lane');
+		await self.refresh();
+		assert.equal(fetches, 2, 'the first idle poll');
+		t += 5e3; await self.refresh();
+		t += 20e3; await self.refresh();
+		assert.equal(fetches, 2, 'not within 30 s');
+		t += 6e3; await self.refresh();
+		assert.equal(fetches, 3, 'every 30 s');
+		t += 4e3;
+		self.noteInput();
+		assert.equal(fetches, 4, 'input: at once');
+		assert.equal(self.idle(), false);
+		await self.refreshFast();
+		assert.equal(reads, 2, 'and the fast lane again');
+		power = 'normal';
+		t += 60 * 60e3;
+		assert.equal(self.idle(), false, 'never idle when Low-power router is off');
+	} finally {
+		global.L = saved.L; Date.now = saved.now;
+		if (saved.document === undefined) delete global.document; else global.document = saved.document;
+		delete REPLIES['file read'];
+	}
+});
+
+/* the full poll: one at a time, 2 s from the last one's start, idle (Low-power
+   router) every 30 s, a clock stepped back as time gone; input while LuCI's
+   refresh is paused asks nothing */
+test('refresh: one at a time, spaced from the start, survives a clock step, input asks only while LuCI polls', async () => {
+	const saved = { L: global.L, document: global.document, now: Date.now };
+	let t = 1e12, power = 'normal', release = null, fetches = 0;
+	Date.now = () => t;
+	global.document = { hidden: false, documentElement: { getAttribute: k => k === 'data-vt-power' ? power : null } };
+	global.L = { env: {} };
+	const self = Object.create(view);
+	self.fetch = () => { fetches++; return new Promise(r => { release = r; }); };
+	self.ingest = () => {}; self.paint = () => {}; self.paintLive = () => {};
+	self.st = { lastOk: t, paused: false };
+	self.inputAt = self.fullAt = t;
+	const done = async () => { release({}); await new Promise(r => setImmediate(r)); };
+	try {
+		t += 1e3; self.refresh();
+		assert.equal(fetches, 0, 'within 2 s of load()');
+		t += 4e3; self.refresh();
+		assert.equal(fetches, 1);
+		t += 5e3; self.refresh();
+		assert.equal(fetches, 1, 'one at a time');
+		t += 1e3; await done();
+		t += 1e3; self.refresh();
+		assert.equal(fetches, 2, 'a slow fetch: spaced from its start, not its end');
+		await done();
+		t -= 3600e3; self.refresh();
+		assert.equal(fetches, 3, 'a clock stepped back an hour: not stopped');
+		await done();
+		/* hidden, then shown within the idle spacing: not "Paused while hidden" */
+		power = 'low'; self.inputAt = t - 10 * 60e3;
+		t += 30e3; self.refresh(); await done();
+		global.document.hidden = true; self.refresh();
+		assert.equal(self.st.paused, true);
+		global.document.hidden = false; t += 5e3; self.refresh();
+		assert.equal(self.st.paused, false, 'shown again: not paused, though the idle spacing holds the fetch');
+		/* LuCI's refresh paused: input asks nothing; resumed: it does */
+		const n = fetches;
+		POLL.on = false; t += 60e3; self.noteInput();
+		assert.equal(fetches, n, 'paused from its indicator');
+		self.inputAt = t - 10 * 60e3; POLL.on = true; self.noteInput();
+		assert.equal(fetches, n + 1);
+		await done();
+	} finally {
+		POLL.on = true;
+		global.L = saved.L; Date.now = saved.now;
+		if (saved.document === undefined) delete global.document; else global.document = saved.document;
+	}
+});
+
+test('Low-power router: a failed slow reply is asked again at the next poll; a radio read from the config keeps iwinfo on every interface', async () => {
+	const saved = { L: global.L, document: global.document, now: Date.now };
+	let t = 1e12, fail = true;
+	const count = {};
+	Date.now = () => t;
+	global.document = { hidden: false, documentElement: { getAttribute: k => k === 'data-vt-power' ? 'low' : null } };
+	global.L = { resolveDefault: (p, d) => Promise.resolve(p).then(v => v == null ? d : v, () => d) };
+	const cnt = k => { count[k] = (count[k] || 0) + 1; };
+	REPLIES['luci.vantage wireless'] = () => { cnt('wifi'); return fail ? Promise.reject(new Error('timeout')) : Promise.resolve({ radio0: { source: 'config', config: {}, interfaces: [ { ifname: 'ra0', config: {} }, { ifname: 'ra1', config: {} } ] } }); };
+	REPLIES['luci.vantage thermal'] = () => { cnt('thermal'); return Promise.resolve([]); };
+	REPLIES['luci.vantage wired'] = () => { cnt('wired'); return Promise.resolve({ hosts: [] }); };
+	REPLIES['iwinfo info'] = d => { cnt('iw ' + d); return Promise.resolve({ channel: 36 }); };
+	REPLIES['hostapd.ra0 get_status'] = () => Promise.resolve({ bssid: '00:00:5e:00:53:a0' });
+	REPLIES['hostapd.ra1 get_status'] = () => Promise.resolve({ bssid: '00:00:5e:00:53:a1' });
+	const self = Object.create(view);
+	try {
+		const first = await self.fetch();
+		assert.equal(first.wifi, null, 'no answer is not "no radios"');
+		t += 5e3; await self.fetch();
+		assert.equal(count.wifi, 2, 'asked again at once, not kept for 30 s');
+		fail = false;
+		t += 5e3; await self.fetch();
+		t += 5e3; await self.fetch();
+		assert.equal(count.wifi, 3, 'an answer is kept');
+		t += 30e3; await self.fetch();
+		t += 30e3; await self.fetch();
+		assert.deepEqual([ count['iw ra0'], count['iw ra1'] ], [ 3, 3 ], 'from the config: each interface says whether it is up');
+	} finally {
+		global.L = saved.L; Date.now = saved.now;
+		if (saved.document === undefined) delete global.document; else global.document = saved.document;
+		for (const k of Object.keys(REPLIES)) if (/^(luci\.vantage (wireless|thermal|wired)|iwinfo info|hostapd\.)/.test(k)) delete REPLIES[k];
+	}
+});
+
+test('#110: the weak filter leaves quiet stations out, as the card does; the quiet row keeps its error and busy state across rebuilds', async () => {
+	const self = Object.create(view);
+	self.quiet = { '00:00:5e:00:53:01': true };
+	self.ui = { chip: 'weak', filter: '' };
+	self.st = { staRates: {} };
+	const far = { mac: '00:00:5e:00:53:01', signal: -84, name: 'Far' }, near = { mac: '00:00:5e:00:53:02', signal: -80, name: 'Near' };
+	assert.equal(self.isWeak(far), false);
+	assert.equal(self.isWeak(near), true);
+	assert.equal(self.matches(far), false);
+	assert.equal(self.matches(near), true);
+	self.canWrite = true;
+	self.loadAliases = () => Promise.resolve({});
+	let painted = 0;
+	self.rehealth = () => { painted++; };
+	REPLIES['luci.vantage set_quiet'] = () => Promise.resolve({ ok: false, error: 'too-many' });
+	const savedL = global.L;
+	global.L = { resolveDefault: (p, d) => Promise.resolve(p).catch(() => d) };
+	try {
+		const busy = self.saveQuiet(near.mac, true);
+		assert.equal(await self.saveQuiet(near.mac, true), false, 'one save at a time');
+		await busy;
+		assert.equal(painted, 1);
+		assert.match(self.quietSaid['00:00:5e:00:53:02'], /already keeps 512/, 'the error waits for the rebuilt row');
+		assert.ok(!self.quietBusy['00:00:5e:00:53:02']);
+	} finally {
+		global.L = savedL;
+		delete REPLIES['luci.vantage set_quiet'];
+	}
+});
+
+test('#110: the quiet row, once shown for a station, stays while its signal crosses the line', () => {
+	const self = Object.create(view);
+	const shown = [];
+	self.quietRow = c => { shown.push(c.signal); return 'row'; };
+	const body = c => {
+		const quietOn = !!(self.quiet && self.quiet[c.mac]);
+		if (quietOn || (c.signal != null && c.signal < insight.WEAK_DBM)) self.quietShown = c.mac;
+		return !c.gone && (quietOn || self.quietShown === c.mac) ? self.quietRow(c, quietOn) : '';
+	};
+	/* the same rule as drawerClient, read from the source */
+	const src = fs.readFileSync(path.join(RES, 'view/vantage/overview.js'), 'utf8');
+	assert.ok(src.includes("if (quietOn || (c.signal != null && c.signal < insight.WEAK_DBM)) this.quietShown = c.mac;"));
+	assert.ok(src.includes("var quietRow = !c.gone && (quietOn || this.quietShown === c.mac) ? this.quietRow(c, quietOn) : '';"));
+	const insight = load('vantage.insight');
+	assert.equal(body({ mac: 'a', signal: -70 }), '', 'never weak: no row');
+	assert.equal(body({ mac: 'a', signal: -80 }), 'row');
+	assert.equal(body({ mac: 'a', signal: -70 }), 'row', 'kept');
+	assert.equal(body({ mac: 'b', signal: -60 }), '', 'another station: its own rule');
+});
+
+test('#110: a rebuilt quiet row shows the last attempt\'s error and stays disabled while a save is under way', () => {
+	const saved = { E: global.E };
+	global.E = (tag, attrs, children) => ({ tag, attrs: attrs || {}, children: [].concat(children == null ? [] : children), addEventListener() {} });
+	try {
+		const self = Object.create(view);
+		self.canWrite = true;
+		const mac = '00:00:5e:00:53:02';
+		self.quietSaid = { [mac]: 'The device could not write /etc/config/vantage.' };
+		self.quietBusy = { [mac]: true };
+		const row = self.quietRow({ mac: mac.toUpperCase() }, false);
+		const [ box, , err ] = row.children;
+		assert.equal(box.disabled, true, 'busy: disabled');
+		assert.equal(box.checked, false);
+		assert.deepEqual(err.children, [ 'The device could not write /etc/config/vantage.' ]);
+		self.canWrite = false;
+		assert.equal(self.quietRow({ mac }, false), '', 'no grant, not set: nothing');
+	} finally {
+		if (saved.E === undefined) delete global.E; else global.E = saved.E;
+	}
+});
+
+/* luci-rpc getHostHints reads the leases and the ARP table: every 30 s,
+   and for the three polls after a station or wired host first appears */
+test('host hints: every 30 s, and again for three polls when a station or host is new', async () => {
+	let hints = 0, stations = [ { mac: '00:00:5e:00:53:01' } ];
+	REPLIES['luci-rpc getHostHints'] = () => { hints++; return Promise.resolve({ '00:00:5e:00:53:01': { name: 'one' } }); };
+	REPLIES['luci.vantage wireless'] = () => Promise.resolve({ radio0: { up: true, config: {}, interfaces: [ { ifname: 'wl0', config: { mode: 'ap' } } ] } });
+	REPLIES['iwinfo assoclist'] = () => Promise.resolve(stations);
+	const self = Object.create(view);
+	const savedL = global.L, now = Date.now;
+	let t = 1e12;
+	Date.now = () => t;
+	global.L = { resolveDefault: (p, d) => Promise.resolve(p).then(v => v == null ? d : v, () => d) };
+	const poll = async ms => { t += ms; return self.fetch(); };
+	try {
+		let r = await poll(0);
+		assert.equal(hints, 1);
+		r = await poll(5e3);
+		assert.equal(hints, 1, 'kept');
+		assert.equal(r.hints['00:00:5e:00:53:01'].name, 'one', 'the last reply');
+		await poll(25e3);
+		assert.equal(hints, 2, 'again after 30 s');
+		stations = stations.concat([ { mac: '00:00:5e:00:53:02' } ]);
+		await poll(5e3);
+		assert.equal(hints, 2, 'the new station is this poll\'s');
+		/* a failed call spends none of the three */
+		const ok = REPLIES['luci-rpc getHostHints'];
+		REPLIES['luci-rpc getHostHints'] = () => { hints++; return Promise.reject(new Error('timeout')); };
+		const failed = await poll(5e3);
+		assert.equal(failed.hints['00:00:5e:00:53:01'].name, 'one', 'the last reply kept');
+		REPLIES['luci-rpc getHostHints'] = ok;
+		await poll(5e3); await poll(5e3); await poll(5e3);
+		assert.equal(hints, 6, 'then three answered polls in a row');
+		await poll(5e3);
+		assert.equal(hints, 6, 'and kept again');
+	}
+	finally {
+		global.L = savedL; Date.now = now;
+		for (const k of Object.keys(REPLIES)) if (/^(luci-rpc getHostHints|luci\.vantage wireless|iwinfo assoclist)/.test(k)) delete REPLIES[k];
+	}
+});
+
+/* a pulse CSS cancelled since the last step (the dot's state changed) is
+   dropped, not stepped: a time written to it would bring it back, paused,
+   with nothing left to stop it (review of 1.0.19) */
+test('motion clock: a cancelled pulse is dropped, not stepped', () => {
+	const live = { playState: 'paused', currentTime: 0 }, gone = { playState: 'idle', currentTime: null };
+	const self = Object.create(view);
+	self.clock = { anims: [ { a: live, dur: 1000, at: 0 }, { a: gone, dur: 1000, at: 0 } ] };
+	self.wireMap = {};
+	const saved = global.window;
+	global.window = { dispatchEvent() {} };
+	try {
+		self.stepMotion(50, 1000);
+		assert.equal(live.currentTime, 50);
+		assert.equal(gone.currentTime, null, 'not written: it stays cancelled');
+		assert.deepEqual(self.clock.anims.map(x => x.a), [ live ]);
+	} finally { global.window = saved; }
 });
